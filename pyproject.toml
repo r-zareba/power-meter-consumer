@@ -1,0 +1,19 @@
+[project]
+name = "PowerMeter"
+version = "0.1.0"
+description = "MQTT consumer for ESP32 power meter data"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "paho-mqtt>=2.1.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-vv -ra -q"
+log_cli = false
+log_cli_level = "INFO"
+log_format = "%(asctime)s %(levelname)s %(message)s"
+log_date_format = "%Y-%m-%d %H:%M:%S"
+filterwarnings = "ignore"
+cache_dir = ".pytest_cache"
