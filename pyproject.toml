@@ -5,8 +5,11 @@ description = "MQTT consumer for ESP32 power meter data"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "paho-mqtt>=2.1.0",
+    "pyserial>=3.5",
 ]
+
+[tool.uv]
+link-mode = "copy"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
