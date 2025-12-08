@@ -181,7 +181,7 @@ class ADCReceiver:
                 if packet:
                     if callback:
                         callback(packet)
-
+                    
                     # Print stats every 100 packets
                     if self.packet_count % 100 == 0:
                         elapsed = time.time() - start_time

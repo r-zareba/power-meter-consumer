@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <string.h> // For memcpy() in packet transmission
+#include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -169,6 +170,12 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
   // Trailer: checksum(2) + end(2) = 4 bytes
   uint16_t packet_size = 6 + (size * 2) + 4;
 
+  // Force UART state to READY before DMA transmission (workaround for callback
+  // issue)
+  if (huart2.gState != HAL_UART_STATE_READY) {
+    huart2.gState = HAL_UART_STATE_READY;
+  }
+
   // Start non-blocking UART transmission via DMA
   uart_tx_busy = 1; // Set flag before starting transmission
   HAL_UART_Transmit_DMA(&huart2, (uint8_t *)&tx_packet, packet_size);
@@ -210,7 +217,6 @@ int main(void) {
   MX_ADC1_Init();
   MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
-
   // Calibrate ADC for accurate measurements (required before first use)
   HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
 
@@ -220,10 +226,6 @@ int main(void) {
   // Start ADC with DMA in circular mode
   HAL_StatusTypeDef adc_status =
       HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, BUFFER_SIZE);
-
-  // CRITICAL FIX: Force enable DMA interrupts by directly writing to registers
-  DMA1_Channel1->CCR |= DMA_CCR_HTIE; // Half Transfer Interrupt Enable
-  DMA1_Channel1->CCR |= DMA_CCR_TCIE; // Transfer Complete Interrupt Enable
 
   // Diagnostic: Blink LED 3 times at startup to show system is running
   for (int i = 0; i < 3; i++) {
@@ -255,15 +257,53 @@ int main(void) {
 
     /* USER CODE BEGIN 3 */
 
+    // WORKAROUND: Poll DMA transfer status directly (callbacks may not fire
+    // reliably)
+    static uint32_t last_poll_time = 0;
+    static uint32_t last_tx_time = 0;
+    uint32_t current_time = HAL_GetTick();
+
+    // Force clear uart_tx_busy if UART callback didn't fire after 50ms
+    if (uart_tx_busy && (current_time - last_tx_time > 50)) {
+      uart_tx_busy = 0;
+    }
+
+    // Check DMA status every 100ms
+    if (current_time - last_poll_time >= 100) {
+      last_poll_time = current_time;
+
+      // Check DMA transfer counter to see if we've filled half/full buffer
+      uint32_t remaining = __HAL_DMA_GET_COUNTER(&hdma_adc1);
+
+      // If counter is in second half (< 1000), first half is ready
+      if (remaining < HALF_BUFFER_SIZE && buffer_half_ready == 0) {
+        buffer_half_ready = 1;
+      }
+      // If counter wrapped to top half (> 1000), second half is ready
+      else if (remaining >= HALF_BUFFER_SIZE && buffer_half_ready != 1) {
+        if (buffer_half_ready == 0) {
+          buffer_half_ready = 2;
+        }
+      }
+    }
+
     // Check if first half of buffer is ready and UART is available
     if (buffer_half_ready == 1 && !uart_tx_busy) {
       transmit_buffer_uart(&adc_buffer[0], HALF_BUFFER_SIZE);
       buffer_half_ready = 0;
+      last_tx_time = current_time;
+
+      // LED blink to show transmission
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
     }
     // Check if second half of buffer is ready and UART is available
     else if (buffer_half_ready == 2 && !uart_tx_busy) {
       transmit_buffer_uart(&adc_buffer[HALF_BUFFER_SIZE], HALF_BUFFER_SIZE);
       buffer_half_ready = 0;
+      last_tx_time = current_time;
+
+      // LED blink to show transmission
+      HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
     }
   }
   /* USER CODE END 3 */
@@ -450,6 +490,10 @@ static void MX_DMA_Init(void) {
   /* DMA controller clock enable */
   __HAL_RCC_DMA1_CLK_ENABLE();
 
+  /* USER CODE BEGIN DMA_Init 1 */
+
+  /* USER CODE END DMA_Init 1 */
+
   /* DMA interrupt init */
   /* DMA1_Channel1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 0, 0);
@@ -580,6 +624,7 @@ void Error_Handler(void) {
   }
   /* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
  * @brief  Reports the name of the source file and the source line number
