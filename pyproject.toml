@@ -1,10 +1,12 @@
 [project]
 name = "PowerMeter"
 version = "0.1.0"
-description = "MQTT consumer for ESP32 power meter data"
+description = "MQTT consumer for STM32 power meter data"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "numpy>=2.3.5",
+    "plotly>=6.5.0",
     "pyserial>=3.5",
 ]
 
