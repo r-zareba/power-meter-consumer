@@ -1,3 +1,4 @@
+import argparse
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -349,7 +350,234 @@ def calculate_cpc_components(
     }
 
 
-if __name__ == "__main__":
+def run_streamlit_app():
+    """Interactive Streamlit GUI for power analysis"""
+    try:
+        import streamlit as st
+    except ImportError:
+        print("Streamlit not installed. Install with: pip install streamlit")
+        return
+
+    st.set_page_config(page_title="Power Analysis Playground", layout="wide")
+    st.title("⚡ Single-Phase Power Analysis Playground")
+    st.markdown("*IEC 61000-4-7 & IEC 61000-4-30 Compliant*")
+
+    # Sidebar controls
+    st.sidebar.header("Signal Parameters")
+    
+    st.sidebar.subheader("Voltage")
+    v_amp = st.sidebar.slider("Amplitude (V peak)", 10, 400, 325, 5, key="v_amp")
+    v_phase_deg = st.sidebar.slider("Phase (°)", -180, 180, 0, 5, key="v_phase")
+    
+    st.sidebar.subheader("Current")
+    i_amp = st.sidebar.slider("Amplitude (A peak)", 0.1, 20.0, 14.14, 0.1, key="i_amp")
+    i_phase_deg = st.sidebar.slider("Phase (°)", -180, 180, 0, 5, key="i_phase")
+    
+    st.sidebar.subheader("Harmonics")
+    add_harmonics = st.sidebar.checkbox("Add Harmonics")
+    v_harmonics_dict = None
+    i_harmonics_dict = None
+    
+    if add_harmonics:
+        harmonics_tabs = st.sidebar.tabs(["Voltage Harmonics", "Current Harmonics"])
+        
+        # Voltage Harmonics
+        with harmonics_tabs[0]:
+            st.write("**Voltage Odd Harmonics**")
+            v_harmonics_dict = {}
+            
+            for h in [3, 5, 7, 9, 11, 13, 15, 17, 19]:
+                col_amp, col_phase = st.columns(2)
+                with col_amp:
+                    v_h_pct = st.slider(f"H{h} %", 0, 50, 0, 1, key=f"v_h{h}_pct")
+                with col_phase:
+                    v_h_phase = st.slider(f"φ{h} °", -180, 180, 0, 15, key=f"v_h{h}_phase")
+                
+                if v_h_pct > 0:
+                    v_harmonics_dict[h] = (v_h_pct / 100, np.radians(v_h_phase))
+        
+        # Current Harmonics
+        with harmonics_tabs[1]:
+            st.write("**Current Odd Harmonics**")
+            i_harmonics_dict = {}
+            
+            for h in [3, 5, 7, 9, 11, 13, 15, 17, 19]:
+                col_amp, col_phase = st.columns(2)
+                with col_amp:
+                    i_h_pct = st.slider(f"H{h} %", 0, 50, 0 if h != 3 else 20, 1, key=f"i_h{h}_pct")
+                with col_phase:
+                    i_h_phase = st.slider(f"φ{h} °", -180, 180, 0, 15, key=f"i_h{h}_phase")
+                
+                if i_h_pct > 0:
+                    i_harmonics_dict[h] = (i_h_pct / 100, np.radians(i_h_phase))
+
+    # Generate signals
+    v_phase = np.radians(v_phase_deg)
+    i_phase = np.radians(i_phase_deg)
+    
+    t, v_t = generate_sine(v_amp, MAINS_FREQ, v_phase, SAMPLING_FREQ, NUM_SAMPLES, v_harmonics_dict)
+    _, i_t = generate_sine(i_amp, MAINS_FREQ, i_phase, SAMPLING_FREQ, NUM_SAMPLES, i_harmonics_dict)
+    
+    # Calculate metrics
+    v_rms = np.sqrt(np.mean(v_t**2))
+    i_rms = np.sqrt(np.mean(i_t**2))
+    p_t = v_t * i_t
+    p = np.mean(p_t)
+    s = v_rms * i_rms
+    q = np.sqrt(max(0, s**2 - p**2))
+    pf = p / s if s > 0 else 0.0
+    
+    # Harmonics
+    v_harmonics = analyze_harmonics(v_t, SAMPLING_FREQ, MAINS_FREQ)
+    i_harmonics = analyze_harmonics(i_t, SAMPLING_FREQ, MAINS_FREQ)
+    v_thd = calculate_thd(v_harmonics)
+    i_thd = calculate_thd(i_harmonics)
+    
+    # Display metrics in columns
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("V RMS", f"{v_rms:.2f} V")
+        st.metric("I RMS", f"{i_rms:.2f} A")
+    
+    with col2:
+        st.metric("Active Power (P)", f"{p:.2f} W")
+        st.metric("Apparent Power (S)", f"{s:.2f} VA")
+    
+    with col3:
+        st.metric("Reactive Power (Q)", f"{q:.2f} VAR")
+        st.metric("Power Factor", f"{pf:.3f}")
+    
+    with col4:
+        st.metric("Voltage THD", f"{v_thd * 100:.2f}%")
+        st.metric("Current THD", f"{i_thd * 100:.2f}%")
+    
+    # Plots
+    st.subheader("Waveforms")
+    
+    # Create plot
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        subplot_titles=("Voltage", "Current", "Instantaneous Power p(t)")
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=t * 1000, y=v_t, mode='lines', name='Voltage', line=dict(color='blue')),
+        row=1, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=t * 1000, y=i_t, mode='lines', name='Current', line=dict(color='red')),
+        row=2, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=t * 1000, y=p_t, mode='lines', name='p(t)', line=dict(color='green')),
+        row=3, col=1
+    )
+    
+    fig.add_trace(
+        go.Scatter(x=t * 1000, y=[p] * len(t), mode='lines', 
+                   name=f'P_avg = {p:.2f}W', line=dict(color='orange', dash='dash')),
+        row=3, col=1
+    )
+    
+    fig.update_xaxes(title_text="Time (ms)", row=3, col=1)
+    fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
+    fig.update_yaxes(title_text="Current (A)", row=2, col=1)
+    fig.update_yaxes(title_text="Power (W)", row=3, col=1)
+    
+    fig.update_layout(height=800, showlegend=True)
+    st.plotly_chart(fig, width='stretch')
+    
+    # Advanced metrics section (always visible)
+    st.subheader("📊 Advanced Metrics (Phase 2 & 3)")
+    with st.container():
+        v_harmonics_phase = analyze_harmonics_with_phase(v_t, SAMPLING_FREQ, MAINS_FREQ)
+        i_harmonics_phase = analyze_harmonics_with_phase(i_t, SAMPLING_FREQ, MAINS_FREQ)
+        
+        v1_amp, v1_phase = v_harmonics_phase[1]
+        i1_amp, i1_phase = i_harmonics_phase[1]
+        phase_diff = v1_phase - i1_phase
+        dpf = np.cos(phase_diff)
+        
+        # Calculate CPC decomposition
+        cpc = calculate_cpc_components(v_t, i_t, SAMPLING_FREQ, MAINS_FREQ)
+        
+        # Phase 2 Metrics
+        st.subheader("Phase 2: Standard Compliance")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.write("**Power Factors**")
+            st.write(f"- Displacement PF (DPF): {dpf:.3f}")
+            st.write(f"- Distortion Factor (DF): {cpc['DF']:.3f}")
+            st.write(f"- Total PF = DPF × DF: {cpc['PF']:.3f}")
+        
+        with col2:
+            st.write("**Waveform Quality**")
+            v_crest = np.max(np.abs(v_t)) / v_rms
+            i_crest = np.max(np.abs(i_t)) / i_rms
+            st.write(f"- V Crest Factor: {v_crest:.3f}")
+            st.write(f"- I Crest Factor: {i_crest:.3f}")
+            st.write(f"- Phase Difference: {np.degrees(phase_diff):.1f}°")
+        
+        with col3:
+            st.write("**Harmonics Overview**")
+            st.write(f"- Voltage THD: {v_thd * 100:.2f}%")
+            st.write(f"- Current THD: {i_thd * 100:.2f}%")
+            st.write(f"- Fundamental: {v_harmonics[1]:.1f}V, {i_harmonics[1]:.2f}A")
+        
+        # Phase 3: Czarnecki CPC Theory
+        st.subheader("Phase 3: Czarnecki CPC Decomposition")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Current Components (RMS)**")
+            st.write(f"- 🟢 Active (I_a): {cpc['I_a']:.3f} A ({cpc['lambda_a'] * 100:.1f}%)")
+            st.write(f"- 🔵 Reactive (I_r): {cpc['I_r']:.3f} A ({cpc['lambda_r'] * 100:.1f}%)")
+            st.write(f"- 🟡 Scattered (I_s): {cpc['I_s']:.3f} A ({cpc['lambda_s'] * 100:.1f}%)")
+            st.write(f"- 🔴 Generated (I_g): {cpc['I_g']:.3f} A ({cpc['lambda_g'] * 100:.1f}%)")
+            st.write(f"- **Total (I_rms): {cpc['I_rms']:.3f} A**")
+            
+            # Orthogonality check
+            i_check = np.sqrt(cpc['I_a']**2 + cpc['I_r']**2 + cpc['I_s']**2 + cpc['I_g']**2)
+            st.write(f"- ✓ Verification: {i_check:.3f} A")
+        
+        with col2:
+            st.write("**Power Components**")
+            st.write(f"- Active Power (P): {cpc['P']:.2f} W")
+            st.write(f"- Reactive Power (Q₁): {cpc['Q1']:.2f} VAR")
+            st.write(f"- Scattered Power (D_s): {cpc['D_s']:.2f} VA")
+            st.write(f"- Generated Power (D_g): {cpc['D_g']:.2f} VA")
+            st.write(f"- **Apparent Power (S): {cpc['S']:.2f} VA**")
+            st.write("")
+            st.write("**Interpretation:**")
+            st.write(f"- Load distortion: {cpc['lambda_g'] * 100:.1f}%")
+            st.write(f"- Supply distortion: {cpc['lambda_s'] * 100:.1f}%")
+        
+        # Harmonic table
+        st.subheader("Harmonic Analysis (Up to 19th)")
+        harmonic_data = []
+        for h in range(1, 20):
+            v_h_amp, v_h_phase = v_harmonics_phase[h]
+            i_h_amp, i_h_phase = i_harmonics_phase[h]
+            harmonic_data.append({
+                "H": h,
+                "V (V)": f"{v_h_amp:.2f}",
+                "I (A)": f"{i_h_amp:.3f}",
+                "V Phase (°)": f"{np.degrees(v_h_phase):.1f}",
+                "I Phase (°)": f"{np.degrees(i_h_phase):.1f}"
+            })
+        
+        st.table(harmonic_data)
+
+
+def main_cli():
+    """Command-line interface execution"""
     # Example usage - generate time-domain signals
     vt, v_t = generate_sine(
         amplitude=325,
@@ -638,3 +866,19 @@ if __name__ == "__main__":
     # Visualization
     print("Generating plots...")
     plot_power_analysis(vt, v_t, i_t, p_t, p, title="Single-Phase Power Analysis")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Single-Phase Power Analysis")
+    parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="Launch interactive Streamlit GUI"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.gui:
+        run_streamlit_app()
+    else:
+        main_cli()
