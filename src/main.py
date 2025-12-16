@@ -8,7 +8,7 @@ import argparse
 
 import serial
 
-from receiver import ADCReceiver
+from receiver.receiver import ADCReceiver
 
 
 def parse_args():
@@ -20,9 +20,6 @@ def parse_args():
     )
     parser.add_argument(
         "--baud", type=int, default=921600, help="Baud rate (default: 921600)"
-    )
-    parser.add_argument(
-        "--stats", action="store_true", help="Print statistics for each packet"
     )
     parser.add_argument(
         "--raw", action="store_true", help="Display raw bytes (no parsing)"
@@ -69,7 +66,7 @@ def main():
     print(f"Connected to serial port {args.port} at {args.baud} baud")
 
     try:
-        receiver.receive_continuous(print_stats=args.stats)
+        receiver.receive_continuous()
     except KeyboardInterrupt:
         print("\nStopped by user")
     except Exception as e:

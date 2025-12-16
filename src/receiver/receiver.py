@@ -3,9 +3,8 @@
 import struct
 import time
 
+import numpy as np
 import serial
-
-from utils import calculate_stats
 
 
 class ADCReceiver:
@@ -15,6 +14,7 @@ class ADCReceiver:
     START_MARKER = 0xAA55
     END_MARKER = 0x55AA
     EXPECTED_SAMPLES = 1000
+    ANALYSIS_WINDOW = 2000  # IEC 61000-4-7 compliant: 200ms at 10kHz (2 buffers)
 
     def __init__(self, port: str, baudrate: int):
         self.port = port
@@ -24,6 +24,10 @@ class ADCReceiver:
         self.error_count = 0
         self.last_sequence = None
         self.start_time = None
+
+        # Sample accumulation for 2-buffer analysis window
+        self.sample_buffer = []
+        self.analysis_count = 0
 
     def connect(self) -> bool:
         """Open serial port connection"""
@@ -150,22 +154,59 @@ class ADCReceiver:
             "timestamp": time.time(),
         }
 
-    def receive_continuous(self, print_stats=False):
-        """Continuously receive and optionally print packet statistics"""
+    def process_analysis_window(self, samples: list):
+        """
+        Execute power analysis on 2000-sample window (200ms at 10kHz).
+        IEC 61000-4-7 compliant analysis window.
+
+        Args:
+            samples: List of 2000 ADC samples
+        """
+        samples_array = np.array(samples, dtype=np.float64)
+
+        start_time = time.time()
+        # Basic statistics
+        mean_val = np.mean(samples_array)
+        rms_val = np.sqrt(np.mean(samples_array**2))
+
+        end_time = time.time()
+
+        print(f"Analysis done in miliseconds: {(end_time - start_time) * 1000:.2f} ms")
+
+
+    def receive_continuous(self):
+        """Continuously receive and accumulate samples for 2-buffer analysis"""
 
         self.start_time = time.time()
+
+        print(
+            f"Starting continuous reception with {self.ANALYSIS_WINDOW}-sample analysis windows"
+        )
+        print(f"(2 buffers {self.EXPECTED_SAMPLES} samples = 200ms at 10kHz)\n")
 
         while True:
             packet = self.read_packet()
             if packet:
-                if print_stats:
-                    stats = calculate_stats(packet["samples"])
+                # Accumulate samples into buffer
+                self.sample_buffer.extend(packet["samples"])
+
+                # Check if we have enough samples for analysis window
+                if len(self.sample_buffer) >= self.ANALYSIS_WINDOW:
+                    # Extract exactly ANALYSIS_WINDOW samples
+                    analysis_samples = self.sample_buffer[: self.ANALYSIS_WINDOW]
+
+                    # Keep remaining samples for next window
+                    self.sample_buffer = self.sample_buffer[self.ANALYSIS_WINDOW :]
+
+                    # Perform analysis
+                    self.analysis_count += 1
+                    self.process_analysis_window(analysis_samples)
+
+                # Status update every 10 packets
+                if self.packet_count % 10 == 0:
                     print(
-                        f"Seq {packet['sequence']:5d}: mean={stats['mean']:7.1f}, "
-                        f"min={stats['min']:4d}, max={stats['max']:4d}, std={stats['std']:6.1f}"
+                        f"Packets: {self.packet_count}, Errors: {self.error_count}, Analyses: {self.analysis_count}"
                     )
-                elif self.packet_count % 10 == 0:
-                    print(f"Packets: {self.packet_count}, Errors: {self.error_count}")
 
     def print_summary(self):
         """Print summary statistics"""
@@ -174,8 +215,13 @@ class ADCReceiver:
 
         elapsed = time.time() - self.start_time
         if elapsed > 0:
-            print("\nSummary:")
-            print(f"  Total packets: {self.packet_count}")
+            print("\n" + "=" * 60)
+            print("Summary:")
+            print(f"  Total packets received: {self.packet_count}")
+            print(f"  Analysis windows processed: {self.analysis_count}")
             print(f"  Errors: {self.error_count}")
             print(f"  Duration: {elapsed:.1f}s")
-            print(f"  Rate: {self.packet_count / elapsed:.1f} packets/s")
+            print(f"  Packet rate: {self.packet_count / elapsed:.1f} packets/s")
+            print(f"  Analysis rate: {self.analysis_count / elapsed:.1f} windows/s")
+            print("  Expected analysis rate: 5.0 windows/s (200ms per window)")
+            print("=" * 60)
