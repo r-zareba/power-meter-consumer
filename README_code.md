@@ -8,36 +8,82 @@ This document tracks the step-by-step implementation of the power meter consumer
 
 ---
 
-## ✅ Step 1: Add Buffer Declarations and Defines
+## ✅ Step 1: Add Buffer Declarations and Packet Structure
 
 **Location:** `/* USER CODE BEGIN PV */` section (Private Variables)
 
 **Code Added:**
 ```c
-// DMA Buffer for ADC sampling (circular buffer)
-#define BUFFER_SIZE 2000           // Total buffer: 2000 samples (200ms at 10kHz)
-#define HALF_BUFFER_SIZE 1000      // Half buffer: 1000 samples (100ms at 10kHz)
+#define BUFFER_SIZE 2000           // 200ms at 10kHz (IEC 61000-4-7 compliant)
+#define HALF_BUFFER_SIZE 1000      // 100ms per packet
 
-uint16_t adc_buffer[BUFFER_SIZE];  // Circular buffer filled by DMA
-volatile uint8_t buffer_half_ready = 0;  // 0=none, 1=first half ready, 2=second half ready
+// UART Packet Structure (4010 bytes total)
+typedef struct {
+  uint16_t start_marker;           // 0xAA55
+  uint16_t sequence;               // Packet counter
+  uint16_t count;                  // Samples per channel (1000)
+  uint16_t voltage_data[1000];     // ADC1 voltage samples
+  uint16_t current_data[1000];     // ADC2 current samples
+  uint16_t checksum;               // CRC16-MODBUS
+  uint16_t end_marker;             // 0x55AA
+} PacketData;
+
+uint32_t adc_buffer[BUFFER_SIZE];  // Dual ADC buffer: [I(31:16)|V(15:0)]
+volatile uint8_t buffer_half_ready = 0;  // 0=none, 1=first half, 2=second half
 volatile uint8_t uart_tx_busy = 0;       // 0=idle, 1=transmission in progress
+
+static uint16_t packet_sequence = 0;
+static PacketData tx_packet __attribute__((aligned(4)));
 ```
 
 **Explanation:**
-- **`adc_buffer[2000]`**: Circular buffer where DMA continuously writes ADC samples at 10kHz
-- **`BUFFER_SIZE = 2000`**: Total buffer holds 200ms of data (2000 samples ÷ 10000 samples/sec)
-- **`HALF_BUFFER_SIZE = 1000`**: Each half holds 100ms of data, giving time for UART transmission (~22ms)
-- **`buffer_half_ready`**: Flag set by DMA callbacks to signal which half is ready to transmit
-  - `0` = No buffer ready
-  - `1` = First half (samples 0-999) ready
-  - `2` = Second half (samples 1000-1999) ready
-- **`uart_tx_busy`**: Flag to prevent starting new UART transmission while one is in progress
-- **`volatile` keyword**: Required for variables modified in interrupt handlers to prevent compiler optimization
 
-**Why these values:**
-- 2000 samples enables circular DMA with proper double buffering
-- 1000 samples per half provides 100ms transmission window (UART needs ~22ms at 921600 baud)
-- 16-bit samples match ADC 12-bit data stored in 16-bit registers
+### Memory Layout and Alignment
+The packet structure uses **all `uint16_t` fields** for natural alignment:
+
+**Why NO `__attribute__((packed))` on struct?**
+- All fields are `uint16_t` (2 bytes each)
+- Compiler places them sequentially: 0, 2, 4, 6, 8...
+- All addresses are **naturally even** (required for uint16_t)
+- **No padding added** - struct is already compact!
+- Total size: 2+2+2+2000+2000+2+2 = 4010 bytes (verified at compile time)
+
+**Why `__attribute__((aligned(4)))` on variable?**
+- Applied to **variable declaration**, not struct definition
+- Ensures struct starts at address divisible by 4 (e.g., 0x20000000, 0x20000004...)
+- STM32 DMA controller prefers 4-byte aligned addresses for efficiency
+- Prevents DMA from rejecting the buffer
+
+**Packed vs Aligned - Key Differences:**
+```c
+// ❌ WRONG: Contradictory attributes
+struct __attribute__((packed)) __attribute__((aligned(32))) { ... };
+// packed = "ignore alignment inside"
+// aligned = "respect alignment"
+// → Conflict! HAL DMA rejects this
+
+// ✅ CORRECT: Natural alignment + variable alignment
+struct { uint16_t fields... };  // Naturally aligned (no packed needed)
+static struct Packet __attribute__((aligned(4)));  // Align variable for DMA
+```
+
+### ADC Buffer Format
+- **`adc_buffer[2000]`**: Circular buffer filled by DMA
+- **`uint32_t` type**: Dual ADC packs both channels in one 32-bit word
+  - Bits 15-0: ADC1 voltage sample
+  - Bits 31-16: ADC2 current sample
+- **`BUFFER_SIZE = 2000`**: 200ms at 10kHz (IEC 61000-4-7 compliant window)
+- **`HALF_BUFFER_SIZE = 1000`**: 100ms per packet (allows 44ms TX + 56ms margin)
+
+### Control Flags
+- **`buffer_half_ready`**: Set by ADC DMA callbacks (1=first half, 2=second half)
+- **`uart_tx_busy`**: Prevents starting new TX while one is in progress
+- **`volatile`**: Required for variables modified in interrupt context
+
+**Memory Usage:**
+- ADC buffer: 2000 × 4 = 8,000 bytes
+- TX packet: 4,010 bytes
+- Total: 12,010 bytes (9.4% of 128KB RAM)
 
 ---
 
@@ -113,6 +159,114 @@ Timeline at 10kHz sampling:
 
 **Safety Check:**
 - `if (hadc->Instance == ADC1)` ensures callback only processes our ADC (good practice if multiple ADCs used)
+
+---
+
+## 📘 Understanding DMA Data Width Configuration
+
+### CubeMX Settings: Byte vs Half Word vs Word
+
+When configuring DMA in STM32CubeMX, you'll see **Data Width** settings for both **Peripheral** and **Memory**. Understanding these is critical for proper operation and alignment.
+
+#### DMA Data Width Options
+- **Byte**: 8-bit transfers (1 byte at a time)
+- **Half Word**: 16-bit transfers (2 bytes at a time)
+- **Word**: 32-bit transfers (4 bytes at a time)
+
+### ADC DMA Configuration (Required Settings)
+
+For our dual ADC simultaneous mode:
+```
+DMA1 Channel 1 (ADC):
+  Peripheral: Word (32-bit)
+  Memory:     Word (32-bit)
+```
+
+**Why Word (32-bit) is MANDATORY, not optional:**
+
+1. **Hardware Requirement**: Dual ADC simultaneous mode packs BOTH channel results into a single 32-bit register:
+   ```
+   ADC Common Data Register (CDR):
+   ┌─────────────────┬─────────────────┐
+   │  ADC2 (31:16)   │  ADC1 (15:0)    │
+   │    Current      │    Voltage      │
+   └─────────────────┴─────────────────┘
+         16 bits          16 bits
+   ```
+
+2. **Cannot Use Half Word**: If you tried 16-bit DMA, you'd only transfer half the register (either voltage OR current, losing the other channel!)
+
+3. **Memory Alignment Consequence**: Word (32-bit) DMA requires source buffer address divisible by 4:
+   ```c
+   uint32_t adc_buffer[2000];  // Each element holds both ADC values
+   // Buffer must start at address like: 0x20000000, 0x20000004, 0x20000008...
+   // NOT: 0x20000001, 0x20000002, 0x20000003 (causes HardFault!)
+   ```
+
+4. **Performance is Secondary**: We use 32-bit DMA because the hardware REQUIRES it, not because it's faster
+
+### UART DMA Configuration (Our Settings)
+
+For our UART transmission:
+```
+DMA1 Channel 7 (USART2_TX):
+  Peripheral: Byte (8-bit)
+  Memory:     Byte (8-bit)
+```
+
+**Why Byte (8-bit) is appropriate:**
+
+1. **UART is Byte-Oriented**: UART transmits one byte at a time (8N1 format = 8 data bits, no parity, 1 stop bit)
+
+2. **Flexible Alignment**: Byte-mode DMA has no alignment restrictions:
+   ```c
+   uint8_t data[100];  // Can start at ANY address
+   // 0x20000000 ✓  0x20000001 ✓  0x20000002 ✓  0x20000003 ✓
+   ```
+
+3. **Struct Compatibility**: Works with any buffer, even odd-sized or misaligned:
+   ```c
+   // This works because UART DMA is Byte-mode:
+   HAL_UART_Transmit_DMA(&huart2, (uint8_t*)&tx_packet, sizeof(tx_packet));
+   // tx_packet can start at ANY address
+   ```
+
+### Could We Use Word DMA for UART?
+
+**Yes, technically**, but:
+- ❌ Requires buffer size divisible by 4 (ours is 4010 bytes - NOT divisible by 4!)
+- ❌ Requires buffer address aligned to 4 bytes (adds complexity)
+- ❌ No performance benefit (UART transmit speed bottleneck is baud rate, not DMA)
+- ✅ Byte-mode is simpler and works with any data size
+
+### Memory Alignment Summary
+
+| DMA Width | Alignment Requirement | Buffer Must Be | Example Use Case |
+|-----------|----------------------|----------------|------------------|
+| **Byte**  | None (any address)   | Any size | UART, byte arrays, chars |
+| **Half Word** | Address ÷ 2 = 0 | Even addresses, even size | Single 12-bit ADC, uint16_t arrays |
+| **Word** | Address ÷ 4 = 0 | Addresses ending in 0/4/8/C, size ÷ 4 = 0 | Dual ADC, uint32_t arrays |
+
+### Practical Impact on Our Code
+
+```c
+// ADC Buffer - MUST be 32-bit aligned (Word DMA)
+uint32_t adc_buffer[2000];  // Compiler automatically aligns to 4 bytes ✓
+
+// UART Packet - Byte DMA, no alignment needed
+static PacketData tx_packet __attribute__((aligned(4)));
+// aligned(4) here is for EFFICIENCY (slight speedup), not requirement
+// Even without it, Byte-mode UART DMA would work fine
+```
+
+### Key Takeaways
+
+1. **ADC Word DMA = Hardware Requirement** (dual channel data packed in 32-bit register)
+2. **UART Byte DMA = Flexibility Choice** (works with any data, no alignment headaches)
+3. **Alignment issues only appear when DMA width > Byte** (Half Word or Word modes)
+4. **Compiler usually handles alignment** for global/static arrays, but understanding why helps debugging
+
+**Reference:** STM32L4 Reference Manual RM0351, Section 13 (DMA) and Section 16 (ADC)
 
 ---
 
@@ -219,30 +373,31 @@ uint16_t crc = calculate_crc16(packet_start, word_count);
 
 ### 2. Packet Structure Definition
 ```c
-// Packet structure for UART transmission
+// Packet structure for UART transmission (dual-channel)
 typedef struct {
-  uint16_t start_marker;    // 0xAA55 - synchronization marker
-  uint16_t sequence_number; // Packet counter (0-65535, wraps around)
-  uint16_t sample_count;    // Number of ADC samples in this packet
-  uint16_t adc_data[HALF_BUFFER_SIZE]; // ADC samples (1000 values)
-  uint16_t checksum;                   // CRC16 for integrity validation
-  uint16_t end_marker;                 // 0x55AA - end of packet marker
+  uint16_t start_marker;                  // 0xAA55 - synchronization marker
+  uint16_t sequence_number;               // Packet counter (0-65535, wraps around)
+  uint16_t sample_count;                  // Number of samples per channel in this packet
+  uint16_t voltage_data[HALF_BUFFER_SIZE]; // ADC1 samples (1000 values) - PA0 voltage sensor
+  uint16_t current_data[HALF_BUFFER_SIZE]; // ADC2 samples (1000 values) - PA1 current sensor
+  uint16_t checksum;                      // CRC16 for integrity validation
+  uint16_t end_marker;                    // 0x55AA - end of packet marker
 } __attribute__((packed)) ADCPacket;
 
 // Global variables for packet transmission
 static uint16_t packet_sequence = 0; // Increments with each packet sent
-static ADCPacket tx_packet; // Packet buffer (static to avoid stack overflow)
+static ADCPacket tx_packet; // Packet buffer (static to avoid stack overflow - ~8KB)
 ```
 
 ### 3. Transmission Function
 ```c
 /**
- * @brief  Build packet and transmit ADC buffer via UART with DMA
- * @param  data: Pointer to ADC data buffer
- * @param  size: Number of samples to transmit
+ * @brief  Build packet and transmit dual ADC buffer via UART with DMA
+ * @param  data: Pointer to dual ADC data buffer (32-bit packed words)
+ * @param  size: Number of samples to transmit per channel
  * @retval None
  */
-void transmit_buffer_uart(uint16_t *data, uint16_t size) {
+void transmit_buffer_uart(uint32_t *data, uint16_t size) {
   if (uart_tx_busy) {
     // UART transmission already in progress - skip this buffer
     // In production, might want to log this as a data loss event
@@ -252,17 +407,20 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
   // Build packet header
   tx_packet.start_marker = 0xAA55; // Sync pattern for packet detection
   tx_packet.sequence_number = packet_sequence++; // Increment packet counter
-  tx_packet.sample_count = size;                 // Number of samples
+  tx_packet.sample_count = size;                 // Number of samples per channel
 
-  // Copy ADC data from DMA buffer to transmit packet
-  memcpy(tx_packet.adc_data, data, size * sizeof(uint16_t));
+  // Unpack 32-bit dual ADC data into separate voltage and current arrays
+  // Each 32-bit word contains: [ADC2_current(31:16) | ADC1_voltage(15:0)]
+  for (uint16_t i = 0; i < size; i++) {
+    tx_packet.voltage_data[i] = (uint16_t)(data[i] & 0xFFFF);         // Lower 16 bits = ADC1
+    tx_packet.current_data[i] = (uint16_t)((data[i] >> 16) & 0xFFFF); // Upper 16 bits = ADC2
+  }
 
-  // Calculate CRC16 checksum over: sequence_number + sample_count + adc_data
-  // Use byte pointer to avoid alignment warning with packed struct
+  // Calculate CRC16 checksum over: sequence_number + sample_count + voltage_data + current_data
   uint8_t *checksum_data_bytes = (uint8_t *)&tx_packet.sequence_number;
-  uint16_t checksum_byte_count = (1 + 1 + size) * 2; // (seq + count + samples) * 2 bytes per word
+  uint16_t checksum_byte_count = (1 + 1 + size + size) * 2; // (seq + count + voltage + current) * 2 bytes
   
-  // Calculate CRC inline to avoid unaligned pointer issues
+  // Calculate CRC inline
   uint16_t crc = 0xFFFF;
   for (uint16_t i = 0; i < checksum_byte_count; i++) {
     crc ^= checksum_data_bytes[i];
@@ -277,16 +435,16 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
   tx_packet.checksum = crc;
 
   // Add end marker
-  tx_packet.end_marker = 0x55AA; // Different from start for validation
+  tx_packet.end_marker = 0x55AA;
 
-  // Calculate total packet size in bytes
+  // Calculate total packet size in bytes for dual-channel
   // Header: start(2) + seq(2) + count(2) = 6 bytes
-  // Data: size * 2 bytes
+  // Data: voltage_data (size * 2) + current_data (size * 2) bytes  
   // Trailer: checksum(2) + end(2) = 4 bytes
-  uint16_t packet_size = 6 + (size * 2) + 4;
+  uint16_t packet_size = 6 + (size * 2 * 2) + 4;
 
   // Start non-blocking UART transmission via DMA
-  uart_tx_busy = 1; // Set flag before starting transmission
+  uart_tx_busy = 1;
   HAL_UART_Transmit_DMA(&huart2, (uint8_t *)&tx_packet, packet_size);
 }
 ```
@@ -296,11 +454,12 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
 ### Packet Structure (ADCPacket)
 
 ```
-┌─────────────┬────────────┬──────────────┬─────────────┬──────────┬─────────────┐
-│ Start Marker│ Seq Number │ Sample Count │  ADC Data   │ Checksum │ End Marker  │
-│   2 bytes   │  2 bytes   │   2 bytes    │  1000×2 B   │ 2 bytes  │  2 bytes    │
-└─────────────┴────────────┴──────────────┴─────────────┴──────────┴─────────────┘
-     0xAA55      0-65535        1000        uint16[1000]   CRC16       0x55AA
+┌─────────────┬────────────┬──────────────┬──────────────┬──────────────┬──────────┬─────────────┐
+│ Start Marker│ Seq Number │ Sample Count │ Voltage Data │ Current Data │ Checksum │ End Marker  │
+│   2 bytes   │  2 bytes   │   2 bytes    │  1000×2 B    │  1000×2 B    │ 2 bytes  │  2 bytes    │
+└─────────────┴────────────┴──────────────┴──────────────┴──────────────┴──────────┴─────────────┘
+     0xAA55      0-65535        1000       uint16[1000]   uint16[1000]    CRC16       0x55AA
+                                           (ADC1-PA0)     (ADC2-PA1)
 ```
 
 **Field Details:**
@@ -318,21 +477,28 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
    - Helps verify continuous streaming
 
 3. **`sample_count` (typically 1000)**
-   - Number of ADC samples in this packet
+   - Number of ADC samples per channel in this packet
    - Allows variable-length packets if needed
    - Receiver validates this matches expected size
 
-4. **`adc_data[1000]`**
-   - Raw ADC samples from DMA buffer
+4. **`voltage_data[1000]`**
+   - ADC1 samples from PA0 (voltage sensor)
+   - Unpacked from lower 16 bits of dual ADC 32-bit words
    - 12-bit values right-aligned in 16-bit words
    - Little-endian format (STM32's native format)
 
-5. **`checksum` (CRC16)**
-   - Calculated over: sequence + count + data
+5. **`current_data[1000]`**
+   - ADC2 samples from PA1 (current sensor)
+   - Unpacked from upper 16 bits of dual ADC 32-bit words
+   - 12-bit values right-aligned in 16-bit words
+   - Time-aligned with voltage_data (sampled simultaneously)
+
+6. **`checksum` (CRC16)**
+   - Calculated over: sequence + count + voltage_data + current_data
    - Detects transmission errors
    - Start/end markers NOT included in checksum
 
-6. **`end_marker` (0x55AA)**
+7. **`end_marker` (0x55AA)**
    - Confirms complete packet reception
    - Different from start marker (aids debugging)
    - Validates packet framing
@@ -351,7 +517,7 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
 - Wraps around automatically (uint16_t: 0→65535→0)
 
 **`tx_packet`:**
-- Static allocation (~2KB buffer)
+- Static allocation (~8KB buffer for dual-channel)
 - Avoids stack overflow (too large for stack)
 - Reused for each transmission (no malloc needed)
 
@@ -364,25 +530,27 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
 2. **Build packet header**
    - Set start marker (0xAA55)
    - Increment and assign sequence number
-   - Set sample count
+   - Set sample count (per channel)
 
-3. **Copy ADC data**
-   - `memcpy()` from DMA buffer to packet buffer
-   - Fast memory copy (uses optimized ARM instructions)
-   - Size: 1000 samples × 2 bytes = 2000 bytes
+3. **Unpack dual ADC data**
+   - Loop through 32-bit buffer extracting voltage and current
+   - Each 32-bit word: [ADC2_current(31:16) | ADC1_voltage(15:0)]
+   - Lower 16 bits → voltage_data array (ADC1)
+   - Upper 16 bits → current_data array (ADC2)
+   - Ensures perfect time alignment between channels
 
 4. **Calculate checksum**
-   - CRC16 over sequence + count + all samples
+   - CRC16 over sequence + count + voltage_data + current_data
    - Uses byte pointer to avoid alignment issues with packed struct
    - Calculates CRC inline using same algorithm as `calculate_crc16()` function
-   - Byte count: (1 + 1 + 1000) words × 2 = 2004 bytes
+   - Byte count: (1 + 1 + 1000 + 1000) words × 2 = 4004 bytes
 
 5. **Set end marker**
    - 0x55AA for packet validation
 
 6. **Calculate packet size**
-   - Total: 2010 bytes (for 1000 samples)
-   - Overhead: 10 bytes (~0.5%)
+   - Total: 4010 bytes (for 1000 dual-channel samples)
+   - Overhead: 10 bytes (~0.25%)
 
 7. **Start UART DMA transmission**
    - Non-blocking: function returns immediately
@@ -394,18 +562,18 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size) {
 ```
 At 921600 baud:
 - Bytes per second: 921600 / 10 = 92160 bytes/s
-- Packet size: 2010 bytes
-- Transmission time: 2010 / 92160 ≈ 21.8 ms
+- Packet size: 4010 bytes (dual-channel)
+- Transmission time: 4010 / 92160 ≈ 43.5 ms
 
 Timeline:
 0ms: Buffer half ready (callback sets flag)
 0ms: transmit_buffer_uart() called
-0ms: Packet built (~0.5ms for memcpy + CRC)
-0.5ms: UART DMA starts
-22.3ms: UART DMA completes (callback clears uart_tx_busy)
+0ms: Packet built (~1ms for unpacking + CRC)
+1ms: UART DMA starts
+44.5ms: UART DMA completes (callback clears uart_tx_busy)
 100ms: Next buffer half ready
 
-Margin: 100 - 22.3 = 77.7 ms ✓ (plenty of time)
+Margin: 100 - 44.5 = 55.5 ms ✓ (plenty of time)
 ```
 
 ### Safety Features
@@ -415,12 +583,14 @@ Margin: 100 - 22.3 = 77.7 ms ✓ (plenty of time)
 3. **CRC16 checksum**: Validates data integrity
 4. **Start/end markers**: Enables synchronization and framing validation
 5. **Static allocation**: No dynamic memory (reliable for embedded)
+6. **Dual-channel unpacking**: Maintains time alignment between voltage and current
 
 **Key Points:**
 - Function returns immediately (non-blocking DMA)
-- Packet built in ~0.5ms, transmitted in ~22ms
+- Packet built in ~1ms, transmitted in ~44ms
 - Python receiver will use matching CRC algorithm to verify
 - Start/end markers enable robust packet synchronization
+- Dual-channel data perfectly time-aligned for power analysis
 
 ---
 
@@ -922,3 +1092,430 @@ All code changes made to `/home/rafal/PROJECTS/power-meter-consumer/src/main.c` 
 - Main loop (buffer processing and transmission)
 
 **Ready to build and test!** 🚀
+
+---
+
+## 📚 Advanced Topics
+
+### Understanding ADC Hardware Architecture
+
+This section explains how ADC peripherals work in microcontrollers and industry approaches to multi-phase power measurement.
+
+#### Physical ADCs vs Input Channels
+
+**STM32L476RG has 3 physical ADC converters:**
+
+```
+┌─────────────────────────────────────────────────┐
+│  STM32L476RG                                    │
+│                                                 │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐│
+│  │   ADC1     │  │   ADC2     │  │   ADC3     ││
+│  │ (12-bit)   │  │ (12-bit)   │  │ (12-bit)   ││
+│  │ SAR core   │  │ SAR core   │  │ SAR core   ││
+│  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘│
+│        │ MUX           │ MUX           │ MUX    │
+│   ┌────┴────┐     ┌────┴────┐     ┌────┴────┐  │
+│   │16 inputs│     │16 inputs│     │16 inputs│  │
+│   │CH0-CH15 │     │CH0-CH15 │     │CH0-CH15 │  │
+│   └─────────┘     └─────────┘     └─────────┘  │
+│        │               │               │        │
+│       PA0             PA1             PB0       │
+│       PA1             PA4             PB1       │
+│       PA2             PA6             ...       │
+│       ...             ...                       │
+└─────────────────────────────────────────────────┘
+```
+
+**Key Concepts:**
+
+**1. Three Physical ADC Cores = 3 Independent Conversion Circuits**
+- Each has its own SAR (Successive Approximation Register) logic
+- Each can convert ONE sample at a time
+- **Can work simultaneously** (convert different inputs at same instant)
+- All 3 ADCs share same clock source and timing
+
+**2. Each ADC has ~16 Input Channels = Analog Multiplexer (MUX)**
+- Channels are GPIO pins (PA0, PA1, PC0, etc.)
+- **Only ONE channel can be connected to ADC core at a time**
+- Switching channels requires MUX settling time (~100ns)
+- Channel selection controlled by software configuration
+
+**3. Current Single-Phase Setup (Dual ADC Mode)**
+```
+Timer Trigger (10kHz)
+    ↓
+ADC1: Connected to CH5 (PA0 - voltage) ─┐
+                                        ├─ Sampled SIMULTANEOUSLY
+ADC2: Connected to CH6 (PA1 - current) ─┘
+                                        
+Result: One 32-bit word [Current|Voltage] every 100μs
+```
+
+- **No multiplexing** - each ADC stays locked on one channel
+- Both ADCs triggered at exactly same instant
+- Perfect phase alignment between voltage and current
+- Hardware packs results into 32-bit Common Data Register (CDR)
+
+#### Why Sequential Scanning Adds Delays
+
+When using **one ADC with multiple channels**, the physical hardware limitation becomes apparent:
+
+**Inside ONE ADC Core:**
+```
+Timer trigger arrives
+    ↓
+Step 1: Switch MUX to Channel 5 (V1)
+        Wait 100ns for analog settling
+        Convert (12-bit SAR = ~1.5μs)
+        Store result
+    ↓
+Step 2: Switch MUX to Channel 8 (V2)  ⏱️ +1.6μs delay from Step 1
+        Wait 100ns for settling
+        Convert (~1.5μs)
+        Store result
+    ↓
+Step 3: Switch MUX to Channel 11 (V3) ⏱️ +3.2μs delay from Step 1
+        Wait 100ns
+        Convert (~1.5μs)
+        Store result
+
+Total time: ~5μs (but samples taken at DIFFERENT instants!)
+```
+
+**The delay is unavoidable** because one ADC core can only look at one input at a time. The samples are not truly simultaneous even though they're fast.
+
+---
+
+### Industry Standards for 3-Phase Power Measurement
+
+#### Approach 1: Triple Dual ADC (Gold Standard) ⭐
+
+**Hardware Required: 6 ADC cores total**
+
+```
+Phase 1: ADC1 (V1) + ADC2 (I1) → simultaneous sampling
+Phase 2: ADC3 (V2) + ADC4 (I2) → simultaneous sampling
+Phase 3: ADC5 (V3) + ADC6 (I3) → simultaneous sampling
+
+All 6 ADCs triggered at same instant by hardware timer
+```
+
+**Advantages:**
+- ✅ Perfect phase alignment across all 3 phases (within <10ns)
+- ✅ V and I within each phase perfectly synchronized
+- ✅ Accurate power factor and phase angle measurements
+- ✅ Meets IEC 62053-21 Class 0.2S requirements
+- ✅ Can capture fast transients (voltage sags, swells)
+
+**Disadvantages:**
+- ❌ Requires high-end MCU (STM32H7, TI C2000)
+- ❌ Higher cost (~$15-30 per MCU)
+- ❌ More complex PCB routing
+
+**Used By:**
+- **Yokogawa WT5000** - 7-channel power analyzer (~$30,000)
+- **Fluke 1760** - Three-phase power quality recorder (~$8,000)
+- **Hioki PW8001** - Power analyzer (~$15,000)
+- Revenue-grade smart meters (certified for billing)
+
+**Note:** STM32L476 has only 3 ADCs, so this approach requires upgrading to STM32H743 (5 ADCs) or using external ADC chips.
+
+---
+
+#### Approach 2: Sequential Scanning (Budget Power Meters) ⚠️
+
+**Hardware Required: 2 ADC cores (dual mode) with channel scanning**
+
+**Configuration:**
+```
+ADC1 setup:
+  - Scan mode ENABLED
+  - Channels: CH5 (V1), CH8 (V2), CH11 (V3)
+  - Rank 1, 2, 3
+  
+ADC2 setup:
+  - Scan mode ENABLED  
+  - Channels: CH6 (I1), CH9 (I2), CH12 (I3)
+  - Rank 1, 2, 3
+
+Timer: 30kHz trigger rate (3× higher than single phase)
+```
+
+**Sample Sequence:**
+```
+Timer @ 30kHz triggers ADC pair
+    ↓
+Time 0μs:   ADC1(V1) + ADC2(I1) simultaneous → [I1|V1]
+Time 33μs:  ADC1(V2) + ADC2(I2) simultaneous → [I2|V2]
+Time 67μs:  ADC1(V3) + ADC2(I3) simultaneous → [I3|V3]
+Time 100μs: ADC1(V1) + ADC2(I1) simultaneous → [I1|V1] (repeat)
+
+Each phase effectively sampled at 10kHz (30kHz ÷ 3)
+```
+
+**Buffer Layout:**
+```c
+uint32_t adc_buffer[6000];  // 200ms × 30kHz = 6000 samples total
+// Interleaved: [I1|V1], [I2|V2], [I3|V3], [I1|V1], [I2|V2], ...
+//              sample 0          sample 1          sample 2
+```
+
+**Advantages:**
+- ✅ Simple, uses only 2 ADCs
+- ✅ Each phase sampled at adequate rate (~10kHz effective)
+- ✅ V and I **within same phase** perfectly synchronized
+- ✅ Works with STM32L476 (no hardware upgrade needed)
+- ✅ Low cost solution
+
+**Disadvantages:**
+- ⚠️ **Phase-to-phase timing skew** up to 67μs
+- ⚠️ At 50Hz (20ms period), 67μs = **1.2° phase error between phases**
+- ⚠️ At 60Hz (16.7ms period), 67μs = **1.4° phase error between phases**
+- ⚠️ Affects cross-phase measurements (unbalance, sequence components)
+- ⚠️ Cannot accurately capture very fast transients (<100μs)
+
+**Phase Error Impact:**
+
+| Measurement | Single Phase | 3-Phase Sequential | Impact |
+|-------------|-------------|-------------------|--------|
+| Active Power (W) | ✅ Accurate | ✅ Accurate (<0.5% error) | Minimal |
+| Power Factor | ✅ Accurate | ✅ Acceptable (within phase) | Minimal |
+| THD (harmonics) | ✅ Accurate | ✅ Accurate | None |
+| Voltage unbalance | N/A | ⚠️ 1-2° error | Moderate |
+| Phase sequence | N/A | ⚠️ May misidentify | Significant |
+| Transient capture | ✅ Accurate | ❌ Blurred timing | Poor |
+
+**When Acceptable:**
+- Power quality monitoring (harmonics, distortion) ✅
+- Energy consumption tracking ✅
+- Residential/commercial metering (non-revenue) ✅
+- Load profiling and trending ✅
+- Budget-constrained designs ✅
+
+**When NOT Acceptable:**
+- Revenue metering (legal requirements) ❌
+- Grid-tied inverter monitoring (needs <0.1° accuracy) ❌
+- Transient power quality events (IEEE 1159 Class I) ❌
+- High-precision phase angle measurements ❌
+- Synchronization with grid events ❌
+
+**Used By:**
+- Entry-level 3-phase energy monitors
+- Building management systems (BMS)
+- Non-certified residential meters
+- Educational/prototyping projects
+
+---
+
+#### Approach 3: External ADC Chips (Industrial Standard) 🏭
+
+**Hardware: Dedicated multi-channel simultaneous ADC ICs**
+
+**Popular Chips:**
+
+**Analog Devices ADE9000** (~$5-8)
+- 7 simultaneous channels (V1, I1, V2, I2, V3, I3, Neutral)
+- 8kSPS per channel
+- Built-in DSP: FFT, harmonics, power calculations
+- SPI/I2C interface to MCU
+- Certified for IEC 62053-21/22 (revenue metering)
+
+**Microchip ATM90E32** (~$4-6)
+- 6 simultaneous channels
+- 4kSPS per channel
+- On-chip power/energy calculations
+- SPI interface
+- 0.1% accuracy class
+
+**Maxim MAX78630** (~$6-10)
+- 6 simultaneous channels
+- 4kSPS with 24-bit resolution
+- Integrated LCD driver
+- Revenue-grade accuracy
+
+**Architecture:**
+```
+STM32L476                External ADC Chip (ADE9000)
+  │                              │
+  │                     ┌────────┴─────────────┐
+  │                     │  6 SAR ADC Cores     │
+  │                     │  Hardware Sample/Hold│
+  │                     │  All triggered same  │
+  │                     │  instant (<10ns skew)│
+  │                     └─┬──┬──┬──┬──┬──┬─────┘
+  │                      V1 I1 V2 I2 V3 I3
+  │                              │
+  │                     ┌────────┴─────────────┐
+  │                     │  Built-in DSP Engine │
+  │                     │  - Active/Reactive P │
+  │                     │  - Harmonics to 63rd │
+  │                     │  - RMS calculations  │
+  │                     └──────────┬───────────┘
+  │                              │
+  ├──────── SPI (10MHz) ─────────┤
+  │                              │
+  │  STM32 reads:                │
+  │  - Calculated power values   │
+  │  - Pre-computed harmonics    │
+  │  - Calibrated RMS            │
+```
+
+**Advantages:**
+- ✅ True simultaneous sampling (all 6 channels within <10ns)
+- ✅ Built-in power calculations (W, VAR, VA, PF, energy)
+- ✅ Hardware harmonic analysis (up to 63rd harmonic)
+- ✅ Certified for revenue metering (IEC 62053-21/22)
+- ✅ Reduces MCU CPU load (calculations offloaded to ADC chip)
+- ✅ Higher resolution (16-24 bit vs 12-bit internal ADC)
+- ✅ Built-in calibration features
+- ✅ Proven, tested designs
+
+**Disadvantages:**
+- ❌ Additional BOM cost ($5-10 per chip)
+- ❌ Requires external component design (voltage dividers, current transformers)
+- ❌ More complex PCB (analog signal routing)
+- ❌ Learning curve for chip-specific APIs
+
+**Used By:**
+- **Commercial smart meters** (Landis+Gyr, Itron, Elster)
+- **Industrial power monitors** (Schneider Electric, ABB)
+- **Grid-tied inverters** (SolarEdge, Enphase)
+- **Substation monitoring equipment**
+- **Data center power distribution units (PDUs)**
+
+**Development Ecosystem:**
+- Reference designs available from manufacturers
+- Evaluation boards (~$100-200)
+- Arduino/STM32 libraries available
+- Certification test houses familiar with these chips
+
+---
+
+### Recommended Approach for Different Use Cases
+
+#### For Your Current Project (Single Phase) ✅
+
+**Stick with dual ADC simultaneous mode:**
+```
+ADC1 (voltage) + ADC2 (current)
+Timer: 10kHz
+DMA: 32-bit Word mode
+```
+
+**Why:**
+- Perfect for single-phase learning/research
+- Meets IEC 61000-4-7 standards
+- No phase timing issues
+- Simple, proven architecture
+- Easily scalable to sequential 3-phase later
+
+---
+
+#### For Future 3-Phase Projects
+
+**Option A: Prototyping / Non-Critical Monitoring**
+
+Use **sequential scanning** with current STM32L476:
+```
+ADC1: 3 channels (V1, V2, V3)
+ADC2: 3 channels (I1, I2, I3)
+Timer: 30kHz
+```
+
+**Good for:**
+- Academic projects
+- Non-revenue energy monitoring
+- Building automation
+- General power quality trending
+
+**Limitations:**
+- 1-2° phase error between phases
+- Not certifiable for revenue metering
+
+---
+
+**Option B: Professional / Commercial Product**
+
+Use **ADE9000 or ATM90E32** external ADC chip:
+```
+External ADC: 6 simultaneous channels
+STM32: SPI communication + data logging
+Total BOM addition: ~$8-12
+```
+
+**Good for:**
+- Product development for sale
+- Certification requirements (CE, UL, IEC)
+- Revenue-grade accuracy needed
+- Competitive with commercial analyzers
+
+**Benefits:**
+- Saves months of calibration and testing
+- Proven accuracy and reliability
+- Built-in power calculations reduce firmware complexity
+- Certifiable for legal metrology
+
+---
+
+**Option C: High-End / Research Equipment**
+
+Upgrade to **STM32H743** or similar (5 ADCs):
+```
+Phase 1: ADC1 + ADC2
+Phase 2: ADC3 + ADC4  
+Phase 3: ADC5 + external sigma-delta ADC
+Timer: 10-100kHz
+```
+
+**Good for:**
+- Research laboratory equipment
+- High-precision transient analysis
+- Custom analyzer development
+- Maximum flexibility
+
+**Trade-offs:**
+- Higher MCU cost (~$10-15 vs $5)
+- More complex firmware
+- Overkill for most applications
+
+---
+
+### Summary Table
+
+| Approach | ADC Cores | Phase Accuracy | Complexity | Cost | Best For |
+|----------|-----------|----------------|------------|------|----------|
+| **Dual ADC (current)** | 2 | Perfect (single phase) | Low | $5 | Single-phase learning ✅ |
+| **Sequential Scan** | 2 | ±1-2° between phases | Low | $5 | Non-critical 3-phase |
+| **External ADC Chip** | 2 + IC | <0.1° (all channels) | Medium | $13-18 | Commercial products ⭐ |
+| **Multi-ADC MCU** | 5-6 | <0.01° (all channels) | High | $15-30 | Research/high-end |
+
+### Industry Reality
+
+**What professional manufacturers use:**
+- **90%+ use external ADC chips** (ADE9000, ATM90E32, etc.)
+- **5% use high-end MCUs** (TI C2000 DSPs with 6+ ADCs)
+- **<5% use sequential scanning** (low-cost non-certified products only)
+
+**Why external ADCs dominate:**
+1. **Certification** - Pre-certified for IEC/ANSI standards
+2. **Reliability** - Proven designs, millions deployed
+3. **Support** - Reference designs, app notes, test procedures
+4. **Cost** - Cheaper than months of calibration work
+5. **Performance** - Better accuracy than MCU internal ADCs
+
+**Bottom Line:**
+- For **learning**: Current dual ADC approach is perfect ✅
+- For **products**: External ADC chip is industry standard ✅
+- For **budget prototypes**: Sequential scanning acceptable ⚠️
+- For **research**: High-end MCU or custom analog front-end ✅
+
+---
+
+### Further Reading
+
+- **AN5305** - STM32 ADC modes and their applications (ST Microelectronics)
+- **IEC 61000-4-30** - Power quality measurement methods
+- **IEC 62053-21/22** - Revenue metering accuracy requirements
+- **ADE9000 Application Note** - 3-phase power measurement best practices
+- **IEEE 1159-2019** - Recommended practice for monitoring electric power quality

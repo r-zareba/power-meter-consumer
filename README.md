@@ -1,11 +1,15 @@
 # Power Meter Consumer
 
-Python application for receiving and analyzing ADC data from STM32 Nucleo L476RG board.
+Python application for receiving and analyzing dual-channel ADC data (voltage and current) from STM32 Nucleo L476RG board.
 
 ## Project Overview
 
-This project implements a 10kHz ADC sampling system using STM32 Nucleo L476RG with DMA for data acquisition.
-The sampled data is transmitted via UART to a laptop where Python software processes it.
+This project implements a **dual simultaneous ADC sampling system** at 10kHz using STM32 Nucleo L476RG with DMA for data acquisition. Both voltage and current channels are sampled at exactly the same instant using hardware-synchronized ADC1 and ADC2 in dual mode, ensuring accurate power measurements and phase relationship analysis.
+
+The sampled data is transmitted via UART to a laptop where Python software performs power quality analysis including:
+- Real, reactive, and apparent power calculations
+- Power factor and harmonic analysis
+- IEC 61000-4-7 compliant measurements
 
 ## STM32 Configuration Steps
 
@@ -85,15 +89,15 @@ HAL_TIM_Base_Start(&htim6);
 - Once DMA channel is added, ADC's "DMA Continuous Requests" option becomes available
 - This is the correct order in STM32CubeMX workflow
 
-**DMA Configuration:**
+**DMA Configuration for Dual ADC Mode:**
 - DMA Controller: DMA1 or DMA2
-- DMA Request: ADC1
+- DMA Request: ADC1 (Master ADC)
 - Channel: Auto-assigned by CubeMX
 - Direction: Peripheral to Memory
 - Priority: High (or Very High for guaranteed timing)
 - Mode: **Circular**
 - Increment Address: Memory address increment enabled, Peripheral address fixed
-- Data Width: Half Word (16-bit) for both peripheral and memory
+- Data Width: **Word (32-bit)** for both peripheral and memory ⭐ **CRITICAL for dual mode**
 
 **Why Circular Mode:**
 - DMA automatically wraps around to buffer start after reaching the end
@@ -101,11 +105,12 @@ HAL_TIM_Base_Start(&htim6);
 - Perfect for ring buffer implementation
 - Works with Half Transfer Complete and Transfer Complete interrupts for double buffering
 
-**Why Half Word (16-bit):**
-- ADC produces 12-bit results stored in 16-bit registers
-- DMA must match the data size of ADC data register
-- Memory buffer should be array of `uint16_t`
-- Right-aligned: bits 0-11 contain ADC data, bits 12-15 are zero
+**Why Word (32-bit) Data Width:**
+- In dual simultaneous mode, both ADC results are packed into single 32-bit word
+- Common Data Register (CDR): [ADC2_data(31:16) | ADC1_data(15:0)]
+- DMA reads both ADCs' results in one transfer
+- Memory buffer should be array of `uint32_t` (not `uint16_t`!)
+- Each 32-bit word contains: lower 16 bits = ADC1 (voltage), upper 16 bits = ADC2 (current)
 
 **Why Memory Increment Enabled:**
 - Each new ADC sample goes to next position in buffer array
@@ -129,13 +134,16 @@ HAL_TIM_Base_Start(&htim6);
 5. Click on the DMA Request to configure Mode and Data Width:
    - Mode: Circular
    - Increment Address: ☑ Memory (checked), ☐ Peripheral (unchecked)
-   - Data Width: Half Word for both Peripheral and Memory
+   - Data Width: **Word (32 bits)** for BOTH Peripheral and Memory ⭐
 6. Now "DMA Continuous Requests" in ADC Parameter Settings will be automatically enabled
+
+**IMPORTANT:** The 32-bit Word setting is configured AFTER enabling dual ADC mode in ADC1 multi-mode settings.
 
 **Buffer Declaration in Code:**
 ```c
-#define BUFFER_SIZE 1000  // 100ms of data at 10kHz
-uint16_t adc_buffer[BUFFER_SIZE];  // Circular buffer for DMA
+#define BUFFER_SIZE 2000  // 200ms of data at 10kHz (dual channel)
+uint32_t adc_buffer[BUFFER_SIZE];  // Circular buffer for DMA (32-bit for dual ADC!)
+// Each 32-bit word contains: [ADC2_current(31:16) | ADC1_voltage(15:0)]
 ```
 
 **DMA Interrupts Configuration:**
@@ -145,13 +153,105 @@ uint16_t adc_buffer[BUFFER_SIZE];  // Circular buffer for DMA
 
 ---
 
-### Step 4: Configure ADC for Timer-Triggered Conversions
+### Step 4: Hardware Pin Configuration for Dual-Channel Measurement
 
-**ADC Selected:** ADC1
+**Pin Assignments:**
 
-**Pin Selection:** PA0 (ADC1_IN5) - Single-ended mode
-- Available on CN8 connector, pin A0 on Arduino header
-- Other options: PA1, PA4, PB0, PC0, etc.
+**Voltage Channel:**
+- Arduino Pin: **A0**
+- STM32 Pin: **PA0**
+- ADC Channel: **ADC1_IN5**
+- Sensor: Voltage sensor (0-3.3V output)
+- Status: ✅ Already connected
+
+**Current Channel:**
+- Arduino Pin: **A1**
+- STM32 Pin: **PA1**
+- ADC Channel: **ADC2_IN6**
+- Sensor: Current sensor (0-3.3V output)
+- Status: ✅ Already connected
+
+**Physical Wiring on Nucleo Board:**
+```
+CN8 Connector (Arduino Analog Header):
+Pin 1 → A0 (PA0) ← Voltage sensor output ✅
+Pin 2 → A1 (PA1) ← Current sensor output ✅
+Pin 8 → GND      ← Common ground for both sensors
+```
+
+**⚠️ CRITICAL SAFETY REQUIREMENTS:**
+
+**Signal Conditioning Mandatory:**
+- Both sensors MUST output 0-3.3V DC signals (ADC input range)
+- **NEVER connect AC mains voltage directly** - instant board destruction!
+- **NEVER connect AC current directly** - safety hazard!
+
+**Voltage Measurement (for AC mains):**
+- Isolation transformer (230V AC → 12V AC)
+- Precision voltage divider + DC offset circuit
+- Output: 1.65V ± 1.65V (0-3.3V range centered at mid-supply)
+- Galvanic isolation MANDATORY
+
+**Current Measurement:**
+- Current transformer (CT) - e.g., SCT-013-000
+- Burden resistor to convert current to voltage
+- DC offset circuit for bipolar signals
+- Output: 1.65V ± 1.65V (0-3.3V range)
+- Alternative: Hall effect sensor with built-in isolation
+
+**Why PA0 and PA1:**
+- Adjacent pins on Arduino header - easy wiring
+- Minimize noise coupling with proper PCB layout
+- Both pins compatible with dual simultaneous ADC mode
+- PA0 = ADC1_IN5, PA1 = ADC2_IN6 (both support their respective ADCs)
+
+---
+
+### Step 5: Configure Dual Simultaneous ADC Mode
+
+**Dual ADC Configuration:** ADC1 (Master) + ADC2 (Slave)
+
+**Multi-Mode Settings (Critical):**
+- Mode: **Dual mode - Regular simultaneous mode only**
+- DMA Access Mode: **Enabled** (this activates Common Data Register)
+- Effect: Both ADCs sample at exactly the same instant (<10ns synchronization)
+- Data packing: Single 32-bit word = [ADC2_data(31:16) | ADC1_data(15:0)]
+
+**In STM32CubeMX - Configuring Multi-Mode:**
+1. Click on **ADC1** in left sidebar (not ADC2!)
+2. Find "Multi mode parameters" section in Parameter Settings
+3. Set **Mode**: "Dual mode - Regular simultaneous mode only"
+4. Set **DMA Access Mode**: **Enabled** ⭐
+   - Note: You may NOT see additional dropdown options - that's OK!
+   - CubeMX will use DMA mode 1 by default (which is correct)
+5. AFTER configuring multi-mode, go back to DMA Settings tab
+6. Update DMA Data Width to **Word (32 bits)** for both Peripheral and Memory
+
+**ADC1 Configuration (Master - Voltage Channel):**
+- Pin: PA0 (ADC1_IN5) - Single-ended mode
+- Role: Master ADC in dual mode
+- Trigger source: Timer 6 TRGO event
+
+**ADC2 Configuration (Slave - Current Channel):**
+- Pin: PA1 (ADC2_IN6) - Single-ended mode
+- Role: Slave ADC in dual mode
+- Trigger: Automatically synchronized to ADC1 by hardware
+
+**In STM32CubeMX - Configuring ADC2:**
+1. Click on **ADC2** in left sidebar
+2. In "Mode" section, enable **IN6 Single-ended** (this enables PA1)
+3. Configure Parameter Settings (same as ADC1):
+   - Clock Prescaler: Asynchronous clock / 4
+   - Resolution: 12 bits
+   - Data Alignment: Right alignment
+   - Scan Conversion Mode: Disabled
+   - Continuous Conversion Mode: Disabled
+4. Configure ADC2 Channel (Rank 1):
+   - Channel: Channel 6
+   - Sampling Time: 12.5 Cycles (same as ADC1)
+5. **IMPORTANT:** Do NOT set external trigger for ADC2!
+   - ADC2 is slave - triggered automatically by ADC1
+   - Leave trigger as "Software Trigger" or disabled
 
 **Why Single-ended (not Differential):**
 - Single-ended measures voltage on PA0 relative to ground (VSSA)
@@ -251,7 +351,7 @@ HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, BUFFER_SIZE);
 
 ---
 
-### Step 5: Implement DMA Callbacks for Double Buffering
+### Step 6: Implement DMA Callbacks for Double Buffering
 
 **Double Buffering Strategy:**
 - DMA fills a circular buffer continuously
@@ -262,15 +362,16 @@ HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, BUFFER_SIZE);
 
 **Buffer Structure:**
 ```c
-#define BUFFER_SIZE 2000  // Total buffer size (2000 samples)
+#define BUFFER_SIZE 2000  // Total buffer size (2000 samples dual-channel)
 #define HALF_BUFFER_SIZE 1000  // Half buffer = 100ms at 10kHz
 
-uint16_t adc_buffer[BUFFER_SIZE];  // Circular DMA buffer
+uint32_t adc_buffer[BUFFER_SIZE];  // Circular DMA buffer (32-bit for dual ADC)
 volatile uint8_t buffer_half_ready = 0;  // Flag: 1=first half, 2=second half
 ```
 
 **Why This Buffer Size:**
-- 2000 samples total for circular DMA operation
+- 2000 samples total for circular DMA operation (32-bit words)
+- Each 32-bit word contains both voltage (ADC1) and current (ADC2)
 - Each half = 1000 samples = 100ms of data at 10kHz
 - 100ms chunks provide good balance between latency and efficiency
 - Small enough for responsive data streaming, large enough to minimize overhead
@@ -455,7 +556,7 @@ if (process_time > 90)  // Warning if close to 100ms deadline
 
 ---
 
-### Step 6: Configure UART for Data Transmission
+### Step 7: Configure UART for Data Transmission
 
 **UART Selected:** USART2
 
@@ -697,7 +798,7 @@ HAL_UART_Transmit_IT(&huart2, (uint8_t*)data, size * 2);
 
 ---
 
-### Step 7: Implement Data Protocol and Packet Framing ✓
+### Step 8: Implement Data Protocol and Packet Framing ✓
 
 **Why Protocol Needed:**
 - Raw ADC data stream has no structure - PC can't tell where packets start/end
@@ -715,11 +816,12 @@ HAL_UART_Transmit_IT(&huart2, (uint8_t*)data, size * 2);
 **Packet Structure:**
 
 ```
-┌─────────────┬────────────┬──────────────┬─────────────┬──────────┬─────────────┐
-│ Start Marker│ Seq Number │ Sample Count │  ADC Data   │ Checksum │ End Marker  │
-│   2 bytes   │  2 bytes   │   2 bytes    │  N×2 bytes  │ 2 bytes  │  2 bytes    │
-└─────────────┴────────────┴──────────────┴─────────────┴──────────┴─────────────┘
-     0xAA55       uint16        uint16      uint16[N]     uint16       0x55AA
+┌─────────────┬────────────┬──────────────┬──────────────┬──────────────┬──────────┬─────────────┐
+│ Start Marker│ Seq Number │ Sample Count │ Voltage Data │ Current Data │ Checksum │ End Marker  │
+│   2 bytes   │  2 bytes   │   2 bytes    │  N×2 bytes   │  N×2 bytes   │ 2 bytes  │  2 bytes    │
+└─────────────┴────────────┴──────────────┴──────────────┴──────────────┴──────────┴─────────────┘
+     0xAA55       uint16        uint16      uint16[N]      uint16[N]      uint16       0x55AA
+                                           (ADC1-PA0)     (ADC2-PA1)
 ```
 
 **Field Details:**
@@ -736,25 +838,31 @@ HAL_UART_Transmit_IT(&huart2, (uint8_t*)data, size * 2);
 - Wraps around at 65536
 - Helps synchronize and verify continuous streaming
 
-**3. Sample Count (2 bytes): Number of samples**
+**3. Sample Count (2 bytes): Number of samples per channel**
 - Typically 1000 (for 1000-sample buffers)
 - Allows variable-length packets if needed
 - Validation: should match expected buffer size
 - Enables future flexibility (different buffer sizes)
 
-**4. ADC Data (N×2 bytes): Raw samples**
-- Array of 16-bit ADC values
+**4. Voltage Data (N×2 bytes): ADC1 samples from PA0**
+- Array of 16-bit ADC values from voltage sensor
 - Little-endian format (LSB first)
 - 12-bit data right-aligned (bits 0-11 valid, 12-15 zero)
-- Directly from DMA buffer
+- Unpacked from lower 16 bits of dual ADC 32-bit words
 
-**5. Checksum (2 bytes): CRC16 or simple sum**
+**5. Current Data (N×2 bytes): ADC2 samples from PA1**
+- Array of 16-bit ADC values from current sensor
+- Little-endian format (LSB first)
+- 12-bit data right-aligned (bits 0-11 valid, 12-15 zero)
+- Unpacked from upper 16 bits of dual ADC 32-bit words
+
+**6. Checksum (2 bytes): CRC16 or simple sum**
 - Validates data integrity
 - Detects transmission errors
 - CRC16 preferred for better error detection
 - Alternative: simple 16-bit sum for speed
 
-**6. End Marker (2 bytes): 0x55AA**
+**7. End Marker (2 bytes): 0x55AA**
 - Confirms complete packet reception
 - Different from start marker (aids debugging)
 - Optional but helpful for validation
@@ -763,17 +871,18 @@ HAL_UART_Transmit_IT(&huart2, (uint8_t*)data, size * 2);
 - Header: 2 + 2 + 2 = 6 bytes
 - Trailer: 2 + 2 = 4 bytes
 - Total: 10 bytes per packet
-- For 1000 samples: 2000 + 10 = 2010 bytes (~0.5% overhead)
+- For 1000 samples dual-channel: 2000 + 2000 + 10 = 4010 bytes (~0.25% overhead)
 
 **C Implementation:**
 
 ```c
-// Packet structure
+// Packet structure for dual-channel transmission
 typedef struct {
     uint16_t start_marker;      // 0xAA55
     uint16_t sequence_number;   // Packet counter
-    uint16_t sample_count;      // Number of samples in this packet
-    uint16_t adc_data[1000];    // ADC samples (variable size)
+    uint16_t sample_count;      // Number of samples per channel
+    uint16_t voltage_data[1000]; // ADC1 samples (voltage)
+    uint16_t current_data[1000]; // ADC2 samples (current)
     uint16_t checksum;          // CRC16 or sum
     uint16_t end_marker;        // 0x55AA
 } __attribute__((packed)) ADCPacket;
@@ -812,8 +921,8 @@ uint16_t calculate_crc16(uint16_t *data, uint16_t count)
     return crc;
 }
 
-// Prepare and send packet
-void transmit_buffer_uart(uint16_t *data, uint16_t size)
+// Prepare and send packet with dual-channel unpacking
+void transmit_buffer_uart(uint32_t *data, uint16_t size)
 {
     if (uart_tx_busy) {
         return;  // Skip if busy
@@ -824,18 +933,22 @@ void transmit_buffer_uart(uint16_t *data, uint16_t size)
     tx_packet.sequence_number = packet_sequence++;
     tx_packet.sample_count = size;
     
-    // Copy ADC data
-    memcpy(tx_packet.adc_data, data, size * sizeof(uint16_t));
+    // Unpack 32-bit dual ADC data into separate voltage and current arrays
+    // Each 32-bit word: [ADC2_current(31:16) | ADC1_voltage(15:0)]
+    for (uint16_t i = 0; i < size; i++) {
+        tx_packet.voltage_data[i] = (uint16_t)(data[i] & 0xFFFF);         // Lower 16 bits
+        tx_packet.current_data[i] = (uint16_t)((data[i] >> 16) & 0xFFFF); // Upper 16 bits
+    }
     
-    // Calculate checksum (over sequence, count, and data)
+    // Calculate checksum (over sequence, count, voltage_data, and current_data)
     uint16_t *checksum_data = &tx_packet.sequence_number;
-    uint16_t checksum_count = 1 + 1 + size;  // seq + count + samples
+    uint16_t checksum_count = 1 + 1 + size + size;  // seq + count + voltage + current
     tx_packet.checksum = calculate_crc16(checksum_data, checksum_count);
     
     tx_packet.end_marker = 0x55AA;
     
-    // Calculate total packet size
-    uint16_t packet_size = sizeof(uint16_t) * (4 + size + 2);  // markers + header + data + checksum + end
+    // Calculate total packet size for dual-channel
+    uint16_t packet_size = sizeof(uint16_t) * (4 + size + size + 2);  // markers + header + voltage + current + checksum + end
     
     // Transmit via UART DMA
     uart_tx_busy = 1;
@@ -892,9 +1005,10 @@ ADCPacket *packet = malloc(sizeof(ADCPacket));
 
 ```
 Packet overhead: 10 bytes
-Original transmission: 2000 bytes in 21.7 ms
-With protocol: 2010 bytes in 21.8 ms
-Impact: +0.1 ms (negligible)
+Original single-channel: 2000 bytes in 21.7 ms
+Dual-channel transmission: 4010 bytes in 43.5 ms
+Available time window: 100 ms (each buffer half)
+Safety margin: 56.5 ms ✓ (plenty of headroom)
 ```
 
 **Integration with Main Loop:**
@@ -983,26 +1097,25 @@ struct {
 
 ---
 
-### Step 8: Python Receiver Application ✓
+### Step 9: Python Receiver Application ✓
 
 **Overview:**
-Python application to receive, parse, validate, and analyze ADC data from STM32 via serial port.
+Python application to receive, parse, validate, and analyze dual-channel ADC data from STM32 via serial port.
 
 **Features:**
 - Packet synchronization and parsing with CRC16 validation
 - Sequence number tracking for dropped packet detection
-- Real-time plotting (time domain and FFT)
-- Data logging (CSV and binary formats)
-- Signal processing and analysis
-- Command-line interface
+- Dual-channel data reception (voltage and current)
+- IEC 61000-4-7 compliant 200ms analysis windows
+- Real-time statistics display (1-second averaging)
+- Raw byte mode for debugging
 
 **Implementation:**
-See `src/main.py` for the complete Python implementation with:
-- `ADCReceiver` - Base class for serial communication and packet parsing
-- `ADCPlotter` - Real-time visualization with matplotlib
-- `ADCLogger` - Data logging to files
-- `analyze_signal()` - Signal processing utilities
-- Command-line interface with argparse
+See the following files for the complete implementation:
+- `src/main.py` - Main entry point with command-line interface
+- `src/receiver/receiver.py` - `ADCReceiver` class for serial communication and packet parsing
+- `src/analytics/analytics.py` - Power analysis functions (IEC 61000-4-7 & IEC 61000-4-30 compliant)
+- `src/analytics/plots.py` - Plotting utilities for data visualization
 
 ---
 
@@ -1012,50 +1125,45 @@ See `src/main.py` for the complete Python implementation with:
 pip install pyserial numpy matplotlib scipy
 ```
 
+Or install from requirements file:
+```bash
+pip install -r requirements.txt
+```
+
 ## Usage
 
 ### STM32 Side:
-1. Configure peripherals using STM32CubeMX following Steps 1-4
-2. Implement DMA callbacks and UART protocol (Steps 5-7)
+1. Configure peripherals using STM32CubeMX following Steps 1-5
+2. Implement DMA callbacks and UART protocol (Steps 6-8)
 3. Build and flash firmware to Nucleo L476RG
 4. Connect to PC via USB (ST-Link virtual COM port)
 
 ### Python Side:
 
-**List available serial ports:**
+**Normal operation - receive and display statistics:**
 ```bash
-python src/main.py --list-ports
+python src/main.py --port /dev/ttyACM0 --baud 921600
 ```
 
-**Simple receive with statistics:**
+**Raw byte mode (for debugging):**
 ```bash
-python src/main.py --port /dev/ttyACM0 --baud 921600 --stats --duration 10
-```
-
-**Real-time plotting:**
-```bash
-python src/main.py --port /dev/ttyACM0 --baud 921600 --plot
-```
-
-**Log data to binary file:**
-```bash
-python src/main.py --port /dev/ttyACM0 --save measurements.bin --duration 60
-```
-
-**Log data to CSV file:**
-```bash
-python src/main.py --port /dev/ttyACM0 --csv measurements.csv --duration 60
+python src/main.py --port /dev/ttyACM0 --baud 921600 --raw
 ```
 
 **On Windows:**
 ```bash
-python src/main.py --port COM3 --baud 921600 --plot
+python src/main.py --port COM3 --baud 921600
 ```
 
 **On macOS:**
 ```bash
-python src/main.py --port /dev/cu.usbmodem14203 --baud 921600 --stats
+python src/main.py --port /dev/cu.usbmodem14203 --baud 921600
 ```
+
+**Command-line arguments:**
+- `--port` - Serial port device (default: /dev/ttyACM0)
+- `--baud` - Baud rate (default: 921600)
+- `--raw` - Display raw bytes instead of parsing packets (for debugging)
 
 ### Troubleshooting:
 
@@ -1066,7 +1174,7 @@ sudo usermod -a -G dialout $USER
 # Then logout and login
 
 # Or use sudo temporarily
-sudo python src/main.py --port /dev/ttyACM0 --stats
+sudo python src/main.py --port /dev/ttyACM0
 ```
 
 **Find the correct port:**
@@ -1077,22 +1185,29 @@ ls /dev/ttyACM* /dev/ttyUSB*
 # macOS
 ls /dev/cu.usbmodem*
 
-# Or use the built-in command
-python src/main.py --list-ports
+# Windows - Check Device Manager or use:
+mode
 ```
 
 ## Complete System Overview
 
 ```
-┌─────────────┐  Timer    ┌─────────┐  DMA   ┌────────────┐
-│   TIM6      │─────────→ │  ADC1   │───────→│ DMA Buffer │
-│   10kHz     │  Trigger  │ 12-bit  │ Auto   │  2000×16b  │
-└─────────────┘           └─────────┘        └────────────┘
+┌─────────────┐  Timer    ┌──────────────┐  DMA   ┌────────────┐
+│   TIM6      │─────────→ │  ADC1+ADC2   │───────→│ DMA Buffer │
+│   10kHz     │  Trigger  │ Dual 12-bit  │ Auto   │  2000×32b  │
+└─────────────┘           └──────────────┘        └────────────┘
+                           (Simultaneous)          (V+I packed)
                                                     │
                                                     ↓ Callbacks
                                             ┌───────────────┐
                                             │  Double       │
                                             │  Buffering    │
+                                            └───────────────┘
+                                                    │
+                                                    ↓
+                                            ┌───────────────┐
+                                            │  Dual-Channel │
+                                            │  Unpacking    │
                                             └───────────────┘
                                                     │
                                                     ↓
@@ -1118,13 +1233,16 @@ python src/main.py --list-ports
                                     ↓                               ↓
                             ┌───────────────┐              ┌────────────────┐
                             │  Real-time    │              │  Data Logging  │
-                            │  Analysis     │              │  & Storage     │
+                            │  Power        │              │  & Storage     │
+                            │  Analysis     │              │  (V+I pairs)   │
                             └───────────────┘              └────────────────┘
 ```
 
 **Performance:**
-- Sampling rate: 10,000 samples/second
-- Data rate: ~20 KB/s (plus protocol overhead)
+- Sampling rate: 10,000 samples/second per channel (dual simultaneous)
+- Data rate: ~40 KB/s raw data (2 channels × 10kHz × 2 bytes)
+- Packet rate: ~44 KB/s (with protocol overhead)
 - Latency: ~100ms per buffer
 - Reliability: CRC16 checksums, sequence number tracking
-- Throughput: Sustained continuous streaming
+- Throughput: Sustained continuous dual-channel streaming
+- Phase accuracy: <10ns between voltage and current measurements

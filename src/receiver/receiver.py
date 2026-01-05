@@ -13,8 +13,8 @@ class ADCReceiver:
     # Protocol constants (must match STM32)
     START_MARKER = 0xAA55
     END_MARKER = 0x55AA
-    EXPECTED_SAMPLES = 1000
-    ANALYSIS_WINDOW = 2000  # IEC 61000-4-7 compliant: 200ms at 10kHz (2 buffers)
+    EXPECTED_SAMPLES = 1000  # Samples per channel per packet
+    ANALYSIS_WINDOW = 2000  # IEC 61000-4-7 compliant: 200ms at 10kHz (2 packets per channel)
 
     def __init__(self, port: str, baudrate: int):
         self.port = port
@@ -25,8 +25,9 @@ class ADCReceiver:
         self.last_sequence = None
         self.start_time = None
 
-        # Sample accumulation for 2-buffer analysis window
-        self.sample_buffer = []
+        # Sample accumulation for 2-buffer analysis window (dual-channel)
+        self.voltage_buffer = []
+        self.current_buffer = []
         self.analysis_count = 0
 
     def connect(self) -> bool:
@@ -101,15 +102,22 @@ class ADCReceiver:
 
         # Validate sample count
         if sample_count != self.EXPECTED_SAMPLES:
-            print(f"Warning: unexpected sample count {sample_count}")
             self.error_count += 1
             return None
 
-        # Read ADC data
-        data_bytes = self.serial.read(sample_count * 2)
-        if len(data_bytes) != sample_count * 2:
+        # Read dual-channel ADC data: voltage_data[N] + current_data[N]
+        voltage_bytes = self.serial.read(sample_count * 2)
+        if len(voltage_bytes) != sample_count * 2:
             self.error_count += 1
             return None
+
+        current_bytes = self.serial.read(sample_count * 2)
+        if len(current_bytes) != sample_count * 2:
+            self.error_count += 1
+            return None
+
+        # Combine for checksum calculation
+        data_bytes = voltage_bytes + current_bytes
 
         # Read checksum and end marker
         trailer = self.serial.read(4)
@@ -121,92 +129,109 @@ class ADCReceiver:
 
         # Verify end marker
         if end_marker != self.END_MARKER:
-            print(f"Warning: invalid end marker 0x{end_marker:04X}")
             self.error_count += 1
             return None
 
         # Verify checksum
         calculated_crc = self.calculate_crc16(header + data_bytes)
         if calculated_crc != checksum:
-            print(
-                f"Warning: checksum mismatch (0x{checksum:04X} vs 0x{calculated_crc:04X})"
-            )
             self.error_count += 1
             return None
 
-        # Check for dropped packets
+        # Track sequence for dropped packet detection
         if self.last_sequence is not None:
             expected_seq = (self.last_sequence + 1) & 0xFFFF
             if sequence != expected_seq:
                 dropped = (sequence - expected_seq) & 0xFFFF
-                print(
-                    f"Warning: dropped {dropped} packet(s) (seq {self.last_sequence} -> {sequence})"
-                )
+                self.error_count += dropped
 
         self.last_sequence = sequence
         self.packet_count += 1
 
-        # Parse ADC data
-        adc_samples = struct.unpack(f"<{sample_count}H", data_bytes)
+        # Parse dual-channel ADC data
+        voltage_samples = struct.unpack(f"<{sample_count}H", voltage_bytes)
+        current_samples = struct.unpack(f"<{sample_count}H", current_bytes)
+        
         return {
             "sequence": sequence,
-            "samples": list(adc_samples),
+            "voltage": list(voltage_samples),
+            "current": list(current_samples),
             "timestamp": time.time(),
         }
 
-    def process_analysis_window(self, samples: list):
+    def process_analysis_window(self, voltage: list, current: list):
         """
         Execute power analysis on 2000-sample window (200ms at 10kHz).
         IEC 61000-4-7 compliant analysis window.
 
         Args:
-            samples: List of 2000 ADC samples
+            voltage: List of 2000 voltage ADC samples (ADC1)
+            current: List of 2000 current ADC samples (ADC2)
+            
+        Returns:
+            dict: Statistics including v_mean, v_rms, i_mean, i_rms
         """
-        samples_array = np.array(samples, dtype=np.float64)
-
-        start_time = time.time()
-        # Basic statistics
-        mean_val = np.mean(samples_array)
-        rms_val = np.sqrt(np.mean(samples_array**2))
-
-        end_time = time.time()
-
-        print(f"Analysis done in miliseconds: {(end_time - start_time) * 1000:.2f} ms")
+        voltage_array = np.array(voltage, dtype=np.float64)
+        current_array = np.array(current, dtype=np.float64)
+        
+        return {
+            "v_mean": np.mean(voltage_array),
+            "v_rms": np.sqrt(np.mean(voltage_array**2)),
+            "i_mean": np.mean(current_array),
+            "i_rms": np.sqrt(np.mean(current_array**2)),
+        }
 
 
     def receive_continuous(self):
-        """Continuously receive and accumulate samples for 2-buffer analysis"""
+        """Continuously receive packets and print averaged voltage/current every 1 second"""
 
         self.start_time = time.time()
+        last_print_time = time.time()
+        
+        # Accumulators for 1-second averaging
+        v_mean_sum = 0.0
+        i_mean_sum = 0.0
+        sample_count = 0
 
-        print(
-            f"Starting continuous reception with {self.ANALYSIS_WINDOW}-sample analysis windows"
-        )
-        print(f"(2 buffers {self.EXPECTED_SAMPLES} samples = 200ms at 10kHz)\n")
+        print(f"Receiving data from {self.port} at {self.baudrate} baud...\n")
 
         while True:
             packet = self.read_packet()
             if packet:
-                # Accumulate samples into buffer
-                self.sample_buffer.extend(packet["samples"])
+                # Accumulate dual-channel samples
+                self.voltage_buffer.extend(packet["voltage"])
+                self.current_buffer.extend(packet["current"])
 
-                # Check if we have enough samples for analysis window
-                if len(self.sample_buffer) >= self.ANALYSIS_WINDOW:
-                    # Extract exactly ANALYSIS_WINDOW samples
-                    analysis_samples = self.sample_buffer[: self.ANALYSIS_WINDOW]
+                # Process complete analysis windows
+                if len(self.voltage_buffer) >= self.ANALYSIS_WINDOW:
+                    voltage_window = self.voltage_buffer[: self.ANALYSIS_WINDOW]
+                    current_window = self.current_buffer[: self.ANALYSIS_WINDOW]
+                    self.voltage_buffer = self.voltage_buffer[self.ANALYSIS_WINDOW :]
+                    self.current_buffer = self.current_buffer[self.ANALYSIS_WINDOW :]
 
-                    # Keep remaining samples for next window
-                    self.sample_buffer = self.sample_buffer[self.ANALYSIS_WINDOW :]
+                    # Get statistics from this window
+                    stats = self.process_analysis_window(voltage_window, current_window)
+                    
+                    # Accumulate for 1-second average
+                    v_mean_sum += stats["v_mean"]
+                    i_mean_sum += stats["i_mean"]
+                    sample_count += 1
 
-                    # Perform analysis
-                    self.analysis_count += 1
-                    self.process_analysis_window(analysis_samples)
-
-                # Status update every 10 packets
-                if self.packet_count % 10 == 0:
-                    print(
-                        f"Packets: {self.packet_count}, Errors: {self.error_count}, Analyses: {self.analysis_count}"
-                    )
+                # Print average every 1 second
+                current_time = time.time()
+                if current_time - last_print_time >= 1.0:
+                    if sample_count > 0:
+                        v_avg = v_mean_sum / sample_count
+                        i_avg = i_mean_sum / sample_count
+                        elapsed = current_time - self.start_time
+                        print(f"[{elapsed:6.1f}s] V_avg={v_avg:7.1f} ADC, I_avg={i_avg:7.1f} ADC, Packets={self.packet_count:4d}, Errors={self.error_count:2d}")
+                        
+                        # Reset accumulators
+                        v_mean_sum = 0.0
+                        i_mean_sum = 0.0
+                        sample_count = 0
+                    
+                    last_print_time = current_time
 
     def print_summary(self):
         """Print summary statistics"""

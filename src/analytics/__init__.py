@@ -7,6 +7,8 @@ from .analytics import (
     NUM_SAMPLES,
     MAINS_FREQ,
     generate_sine,
+    generate_thyristor_current,
+    generate_triac_current,
     analyze_harmonics,
     analyze_harmonics_with_phase,
     calculate_thd,
