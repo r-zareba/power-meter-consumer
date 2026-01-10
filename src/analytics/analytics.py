@@ -1,6 +1,9 @@
 """
 Power analysis calculation functions for single-phase and three-phase systems.
 IEC 61000-4-7 & IEC 61000-4-30 compliant.
+
+Note: Sensor hardware parameters (VOLTAGE_SENSOR, CURRENT_SENSOR) are defined 
+in src/config.py for calibration and scaling purposes.
 """
 
 import numpy as np

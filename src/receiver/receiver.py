@@ -1,10 +1,12 @@
-"""ADC Receiver for STM32 Power Meter"""
-
 import struct
 import time
 
 import numpy as np
+import plotly.graph_objects as go
 import serial
+from plotly.subplots import make_subplots
+
+from config import ADC_CONFIG
 
 
 class ADCReceiver:
@@ -13,8 +15,12 @@ class ADCReceiver:
     # Protocol constants (must match STM32)
     START_MARKER = 0xAA55
     END_MARKER = 0x55AA
-    EXPECTED_SAMPLES = 1000  # Samples per channel per packet
-    ANALYSIS_WINDOW = 2000  # IEC 61000-4-7 compliant: 200ms at 10kHz (2 packets per channel)
+    EXPECTED_SAMPLES = ADC_CONFIG[
+        "samples_per_packet"
+    ]  # Samples per channel per packet
+    ANALYSIS_WINDOW = (
+        2000  # IEC 61000-4-7 compliant: 200ms at 10kHz (2 packets per channel)
+    )
 
     def __init__(self, port: str, baudrate: int):
         self.port = port
@@ -44,8 +50,16 @@ class ADCReceiver:
                 rtscts=False,
                 dsrdtr=False,
             )
+            # Give port time to stabilize
+            time.sleep(0.1)
+            
+            # Clear any stale data from buffers
             self.serial.reset_input_buffer()
             self.serial.reset_output_buffer()
+            
+            # Wait a bit more for simulator to start sending
+            time.sleep(0.2)
+            
             return True
         except serial.SerialException as e:
             print(f"Failed to open serial port: {e}")
@@ -56,14 +70,21 @@ class ADCReceiver:
         if self.serial and self.serial.is_open:
             self.serial.close()
 
-    def find_sync(self):
-        """Search for start marker in byte stream"""
+    def find_sync(self, max_bytes=None):
+        """Search for start marker in byte stream
+        
+        Args:
+            max_bytes: Maximum bytes to check before giving up (None = unlimited)
+        """
         sync_bytes = struct.pack("<H", self.START_MARKER)
         bytes_checked = 0
 
-        while bytes_checked < 10000:
+        while max_bytes is None or bytes_checked < max_bytes:
             byte = self.serial.read(1)
             if not byte:
+                # Timeout - keep trying in continuous mode
+                if max_bytes is None:
+                    continue
                 return False
             bytes_checked += 1
 
@@ -71,7 +92,8 @@ class ADCReceiver:
                 next_byte = self.serial.read(1)
                 if next_byte == sync_bytes[1:2]:
                     return True
-                bytes_checked += 1
+                if next_byte:
+                    bytes_checked += 1
 
         return False
 
@@ -151,7 +173,7 @@ class ADCReceiver:
         # Parse dual-channel ADC data
         voltage_samples = struct.unpack(f"<{sample_count}H", voltage_bytes)
         current_samples = struct.unpack(f"<{sample_count}H", current_bytes)
-        
+
         return {
             "sequence": sequence,
             "voltage": list(voltage_samples),
@@ -167,13 +189,13 @@ class ADCReceiver:
         Args:
             voltage: List of 2000 voltage ADC samples (ADC1)
             current: List of 2000 current ADC samples (ADC2)
-            
+
         Returns:
             dict: Statistics including v_mean, v_rms, i_mean, i_rms
         """
         voltage_array = np.array(voltage, dtype=np.float64)
         current_array = np.array(current, dtype=np.float64)
-        
+
         return {
             "v_mean": np.mean(voltage_array),
             "v_rms": np.sqrt(np.mean(voltage_array**2)),
@@ -181,19 +203,102 @@ class ADCReceiver:
             "i_rms": np.sqrt(np.mean(current_array**2)),
         }
 
+    def plot_samples(self, voltage: list, current: list):
+        """
+        Debug function: Plot voltage and current samples (one-time scatter plot)
+        
+        Args:
+            voltage: List of voltage ADC samples
+            current: List of current ADC samples
+        """
+        # Create subplots with Plotly
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=(
+                f'Voltage Samples ({len(voltage)} samples, 200ms)',
+                f'Current Samples ({len(current)} samples, 200ms)'
+            ),
+            vertical_spacing=0.12
+        )
+        
+        # Voltage scatter plot
+        fig.add_trace(
+            go.Scattergl(
+                x=list(range(len(voltage))),
+                y=voltage,
+                mode='markers',
+                marker=dict(size=2, opacity=0.6),
+                name='Voltage'
+            ),
+            row=1, col=1
+        )
+        
+        # Current scatter plot
+        fig.add_trace(
+            go.Scattergl(
+                x=list(range(len(current))),
+                y=current,
+                mode='markers',
+                marker=dict(size=2, opacity=0.6),
+                name='Current'
+            ),
+            row=2, col=1
+        )
+        
+        # Update layout
+        fig.update_xaxes(title_text='Sample', row=2, col=1)
+        fig.update_yaxes(title_text='Voltage (ADC)', row=1, col=1)
+        fig.update_yaxes(title_text='Current (ADC)', row=2, col=1)
+        
+        fig.update_layout(
+            height=600,
+            showlegend=False,
+            title_text='ADC Samples Analysis Window'
+        )
+        
+        fig.show()
 
     def receive_continuous(self):
-        """Continuously receive packets and print averaged voltage/current every 1 second"""
+        """Continuously receive packets and calculates stats every 1 second"""
 
         self.start_time = time.time()
         last_print_time = time.time()
-        
+
         # Accumulators for 1-second averaging
         v_mean_sum = 0.0
         i_mean_sum = 0.0
         sample_count = 0
+        
+        # Debug flag - set to True to plot first analysis window
+        plot_debug = True
+        plotted = False
 
-        print(f"Receiving data from {self.port} at {self.baudrate} baud...\n")
+        print(f"Receiving data from {self.port} at {self.baudrate} baud...")
+        print("Waiting for sync...")
+        
+        # Initial sync - be patient and wait for first valid packet
+        sync_attempts = 0
+        first_packet = None
+        while first_packet is None and sync_attempts < 10:
+            first_packet = self.read_packet()
+            if first_packet is None:
+                sync_attempts += 1
+                if sync_attempts % 3 == 0:
+                    print(f"  Still waiting for sync... (attempt {sync_attempts})")
+                    # Flush buffers and try again
+                    self.serial.reset_input_buffer()
+                time.sleep(0.1)
+        
+        if first_packet is None:
+            print("ERROR: Could not establish sync after 10 attempts")
+            print("Make sure device is running and sending data.")
+            return
+        
+        print("Synced. Receiving packets...\n")
+        
+        # Process the first packet
+        self.voltage_buffer.extend(first_packet["voltage"])
+        self.current_buffer.extend(first_packet["current"])
 
         while True:
             packet = self.read_packet()
@@ -209,9 +314,14 @@ class ADCReceiver:
                     self.voltage_buffer = self.voltage_buffer[self.ANALYSIS_WINDOW :]
                     self.current_buffer = self.current_buffer[self.ANALYSIS_WINDOW :]
 
+                    # DEBUG: Plot first analysis window
+                    if plot_debug and not plotted:
+                        self.plot_samples(voltage_window, current_window)
+                        plotted = True
+
                     # Get statistics from this window
                     stats = self.process_analysis_window(voltage_window, current_window)
-                    
+
                     # Accumulate for 1-second average
                     v_mean_sum += stats["v_mean"]
                     i_mean_sum += stats["i_mean"]
@@ -224,13 +334,15 @@ class ADCReceiver:
                         v_avg = v_mean_sum / sample_count
                         i_avg = i_mean_sum / sample_count
                         elapsed = current_time - self.start_time
-                        print(f"[{elapsed:6.1f}s] V_avg={v_avg:7.1f} ADC, I_avg={i_avg:7.1f} ADC, Packets={self.packet_count:4d}, Errors={self.error_count:2d}")
-                        
+                        print(
+                            f"[{elapsed:6.1f}s] V_avg={v_avg:7.1f} ADC, I_avg={i_avg:7.1f} ADC, Packets={self.packet_count:4d}, Errors={self.error_count:2d}"
+                        )
+
                         # Reset accumulators
                         v_mean_sum = 0.0
                         i_mean_sum = 0.0
                         sample_count = 0
-                    
+
                     last_print_time = current_time
 
     def print_summary(self):

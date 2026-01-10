@@ -56,7 +56,7 @@ def main():
             print(f"Error: {e}")
         return
 
-    # Normal packet reception mode
+    # Normal packet mode
     receiver = ADCReceiver(port=args.port, baudrate=args.baud)
     connected = receiver.connect()
     if not connected:

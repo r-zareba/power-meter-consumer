@@ -7,7 +7,7 @@ import numpy as np
 import streamlit as st
 
 # Import all calculation functions from analytics module
-from analytics import (
+from analytics.analytics import (
     MAINS_FREQ,
     NUM_SAMPLES,
     SAMPLING_FREQ,

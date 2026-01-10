@@ -1130,6 +1130,32 @@ Or install from requirements file:
 pip install -r requirements.txt
 ```
 
+## Sensor Configuration
+
+Hardware sensor parameters are centrally defined in `src/config.py`:
+
+```python
+# Voltage sensor (ZMPT101B default)
+VOLTAGE_SENSOR = {
+    "name": "ZMPT101B",
+    "scaling_factor": 1.0 / 230.0,  # V_sensor/V_mains
+    "dc_bias": 1.65,                # V (VCC/2)
+    "max_input": 250.0,             # V AC
+}
+
+# Current sensor (ACS712-05B default)
+CURRENT_SENSOR = {
+    "name": "ACS712-05B",
+    "sensitivity": 0.185,  # V/A
+    "dc_bias": 1.65,       # V (VCC/2)
+    "max_current": 5.0,    # ±A
+}
+```
+
+**To change sensor hardware:** Edit these values in `src/config.py` to match your actual sensors and calibration. These settings are shared across the simulator, receiver, and analytics modules.
+
+See `README_hardware.md` for detailed sensor setup information.
+
 ## Usage
 
 ### STM32 Side:
