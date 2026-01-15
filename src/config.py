@@ -2,8 +2,8 @@
 # Adjust these values based on actual hardware and calibration
 
 ADC_CONFIG = {
-    "bits": 12,  # ADC resolution (12-bit)
-    "max_value": 4095,  # Maximum ADC value (2^12 - 1)
+    "bits": 16,  # ADC resolution (16-bit for H755ZI-Q)
+    "max_value": 65535,  # Maximum ADC value (2^16 - 1)
     "vref": 3.3,  # ADC reference voltage (V)
     "sampling_freq": 10000,  # Sampling frequency (Hz)
     "samples_per_packet": 1000,  # Samples per channel per packet

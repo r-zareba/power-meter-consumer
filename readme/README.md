@@ -1,17 +1,72 @@
 # Power Meter Consumer
 
-Python application for receiving and analyzing dual-channel ADC data (voltage and current) from STM32 Nucleo L476RG board.
+Python application for receiving and analyzing dual-channel ADC data (voltage and current) from STM32 Nucleo boards.
+
+## Supported Hardware
+
+This project supports two STM32 Nucleo boards:
+
+### 1. **STM32 Nucleo-L476RG** (Original Implementation)
+- **ADC Resolution:** 12-bit (4096 levels)
+- **CPU:** 80 MHz ARM Cortex-M4
+- **RAM:** 128 KB
+- **Compliance:** IEC 61000-4-30 Class S
+- **Accuracy:** ±1-2% (with calibration)
+- **Folder:** `stm32/L476RG/`
+- **Status:** ✅ Fully implemented and tested
+
+### 2. **STM32 Nucleo-H755ZI-Q** (Enhanced Version)
+- **ADC Resolution:** 16-bit (65536 levels)
+- **CPU:** Dual-core - M7 @ 480 MHz + M4 @ 240 MHz
+- **RAM:** 1 MB
+- **Compliance:** IEC 61000-4-30 Class A capable
+- **Accuracy:** ±0.2% (with certified sensors)
+- **Folder:** `stm32/H755ZIQ/`
+- **Status:** 🔄 Migration in progress
 
 ## Project Overview
 
-This project implements a **dual simultaneous ADC sampling system** at 10kHz using STM32 Nucleo L476RG with DMA for data acquisition. Both voltage and current channels are sampled at exactly the same instant using hardware-synchronized ADC1 and ADC2 in dual mode, ensuring accurate power measurements and phase relationship analysis.
+This project implements a **dual simultaneous ADC sampling system** at 10kHz with DMA for data acquisition. Both voltage and current channels are sampled at exactly the same instant using hardware-synchronized ADC1 and ADC2 in dual mode, ensuring accurate power measurements and phase relationship analysis.
 
 The sampled data is transmitted via UART to a laptop where Python software performs power quality analysis including:
 - Real, reactive, and apparent power calculations
 - Power factor and harmonic analysis
 - IEC 61000-4-7 compliant measurements
 
+---
+
 ## STM32 Configuration Steps
+
+> **Note:** This guide covers configuration for **both boards**. Board-specific differences are noted with:
+> - 📘 **L476RG** - Original board (12-bit, 80 MHz)
+> - 📗 **H755ZI-Q** - Enhanced board (16-bit, 480 MHz dual-core)
+
+### Hardware Pin Assignments
+
+#### 📘 **L476RG Pin Configuration:**
+```
+CN8 Arduino Header (Analog):
+Pin 1 (A0) → PA0  → ADC1_IN5   (Voltage sensor)
+Pin 2 (A1) → PA1  → ADC2_IN6   (Current sensor)
+Pin 8      → GND  → Ground
+```
+
+#### 📗 **H755ZI-Q Pin Configuration:**
+```
+CN9 Arduino Header (Analog):
+Pin 1 (A0) → PA0 → ADC1_INP16 (Voltage sensor)
+Pin 2 (A1) → PC0 → ADC2_INP10 (Current sensor)
+```
+
+**CN8 (Power) on H755ZI-Q:**
+```
++3.3V → Sensor power
+GND   → Ground
+```
+
+---
+
+## STM32CubeMX Configuration Guide
 
 ### Step 1: Configure uC Clock Source
 

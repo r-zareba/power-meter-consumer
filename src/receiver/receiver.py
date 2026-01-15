@@ -270,7 +270,7 @@ class ADCReceiver:
         sample_count = 0
         
         # Debug flag - set to True to plot first analysis window
-        plot_debug = True
+        plot_debug = False
         plotted = False
 
         print(f"Receiving data from {self.port} at {self.baudrate} baud...")

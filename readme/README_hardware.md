@@ -142,11 +142,19 @@ actual_current = rms_voltage / sensor_sensitivity  # e.g., 0.185 V/A
 
 ## Complete Dual-Channel Setup
 
-**STM32 Connections:**
+**STM32 Connections (L476RG):**
 ```
 CN8 Arduino Header:
 Pin 1 (A0/PA0) ← ZMPT101B output (voltage sensor)
 Pin 2 (A1/PA1) ← Current sensor output (CT or Hall effect)
+Pin 8 (GND)    ← Common ground for all sensors
+```
+
+**STM32 Connections (H755ZI-Q):**
+```
+CN9 Arduino Header:
+Pin 1 (A0/PA0) ← ZMPT101B output (voltage sensor) - ADC1_INP16
+Pin 2 (A1/PC0) ← Current sensor output (CT or Hall effect) - ADC2_INP10
 Pin 8 (GND)    ← Common ground for all sensors
 ```
 
