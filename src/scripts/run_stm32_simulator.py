@@ -33,8 +33,8 @@ class STM32Simulator:
     """Simulates STM32 ADC data transmission via UART"""
 
     # Protocol constants (must match STM32 and receiver)
-    START_MARKER = 0xAA55
-    END_MARKER = 0x55AA
+    START_MARKER = 0xFFFF
+    END_MARKER = 0xFFFE
     SAMPLES_PER_PACKET = ADC_CONFIG["samples_per_packet"]
     SAMPLING_FREQ = ADC_CONFIG["sampling_freq"]
     MAINS_FREQ = 50  # Hz
@@ -154,13 +154,13 @@ class STM32Simulator:
         Build packet with exact STM32 protocol format
 
         Packet structure:
-        - Start Marker (2 bytes): 0xAA55
+        - Start Marker (2 bytes): 0xFFFF
         - Sequence Number (2 bytes): uint16
         - Sample Count (2 bytes): uint16
         - Voltage Data (N×2 bytes): uint16 array
         - Current Data (N×2 bytes): uint16 array
         - Checksum (2 bytes): CRC16
-        - End Marker (2 bytes): 0x55AA
+        - End Marker (2 bytes): 0xFFFE
         """
         # Header
         header = struct.pack(

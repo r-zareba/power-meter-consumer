@@ -1,0 +1,582 @@
+# STM32 Nucleo-H755ZI-Q CubeMX Configuration Guide
+
+**Board:** NUCLEO-H755ZI-Q  
+**Project:** Power Meter - Dual ADC Data Acquisition  
+**Target:** 10 kHz simultaneous dual ADC sampling with DMA and UART transmission
+
+---
+
+## Hardware Pin Configuration
+
+### Analog Inputs (CN9 Arduino Header)
+
+```
+CN9 Connector (Arduino Analog Header):
+├─ Pin 1 (A0) → PA0_C → ADC1_INP16  (Voltage sensor input)
+├─ Pin 2 (A1) → PC0   → ADC2_INP10  (Current sensor input)
+└─ Pin 8 (GND) → Ground             (Common ground)
+```
+
+### Serial Communication
+
+**USART3 (ST-Link Virtual COM Port):**
+- **PD8:** USART3_TX (hardwired to ST-Link on H755ZI-Q)
+- **PD9:** USART3_RX (hardwired to ST-Link on H755ZI-Q)
+
+### Status LEDs (Optional - for debugging)
+
+```
+Onboard LEDs:
+├─ PB0 → LD1 (Green LED)
+├─ PE1 → LD2 (Yellow LED)
+└─ PB14 → LD3 (Red LED)
+```
+
+---
+
+## CubeMX Configuration Steps
+
+### Step 1: Create New Project
+
+**In STM32CubeIDE:**
+1. File → New → STM32 Project
+2. **Board Selector** tab
+3. Commercial Part Number: **NUCLEO-H755ZI-Q**
+4. Select board and click "Next"
+5. Project Name: (your choice, e.g., "PowerMeter_H755ZIQ")
+6. ⚠️ **CRITICAL:** On initialization screen:
+   - ☐ **Uncheck:** "Initialize all peripherals with their default Mode"
+   - ☐ **Uncheck:** "Download firmware"
+7. Click "Finish"
+
+**Verification:**
+- Project created with .ioc file opened
+- "Boot CPU" shows **CM7**
+- Pins mostly unassigned in pinout view
+
+**Why uncheck initialization:**
+- Prevents automatic BSP (Board Support Package) inclusion
+- Gives full control over pin assignments
+- Avoids locked pins (like PD8/PD9 for USART)
+
+---
+
+### Step 2: Enable HSE Clock Source
+
+**In STM32CubeMX:**
+1. Go to **Pinout & Configuration** tab
+2. Left sidebar: **System Core → RCC**
+3. Mode section:
+   - **HSE:** Select **"Crystal/Ceramic Resonator"**
+   - (Leave LSE disabled)
+
+**Verification:**
+- HSE mode shows "Crystal/Ceramic Resonator"
+
+**Why HSE:**
+- Enables 25 MHz crystal on Nucleo board (X3)
+- Required for stable, high-speed operation
+- More accurate than internal HSI oscillator
+
+---
+
+### Step 3: Configure System Clock (200 MHz for M7)
+
+**In STM32CubeMX:**
+1. Click **"Clock Configuration"** tab
+2. Configure **PLL1** (main system clock):
+   - **Input source:** HSE = **25 MHz**
+   - **PLL Source Mux:** HSE
+   - **DIVM1:** **5** → VCO input = 5 MHz
+   - **DIVN1:** **160** → VCO = 800 MHz
+   - **DIVP1:** **2** → PLL1P = 400 MHz
+3. **System Clock Mux:** PLLCLK (or PLL1P)
+4. Configure Domain Prescalers:
+   - **D1CPRE:** **/2** → SYSCLK = 200 MHz
+   - **HPRE:** **/1** (AHB/AXI prescaler)
+   - **D1PPRE (APB3):** **/2** → APB3 = 100 MHz
+   - **D2PPRE1 (APB1):** **/2** → APB1 = 100 MHz
+   - **D2PPRE2 (APB2):** **/2** → APB2 = 100 MHz
+
+**Calculation:**
+```
+VCO = 25 MHz / 5 × 160 = 800 MHz
+PLL1P = 800 MHz / 2 = 400 MHz
+SYSCLK (M7) = 400 MHz / 2 = 200 MHz ✓
+APB1/2/3 = 200 MHz / 2 = 100 MHz
+APB Timer Clocks = 100 MHz × 2 = 200 MHz (auto-doubled)
+```
+
+**Verification:**
+- All clocks show **green** (valid frequencies)
+- SYSCLK shows **200 MHz**
+- APB1 Timer clocks show **200 MHz** (not 100 MHz!)
+
+**Why 200 MHz:**
+- Maximum safe frequency for H755ZI-Q M7 core
+- APB timer clocks double to 200 MHz when prescaler ≠ 1
+- Required for TIM6 calculations to achieve 10 kHz
+
+---
+
+### Step 4: Configure GPIO Pins
+
+**In STM32CubeMX - Pinout View:**
+
+**ADC Pins:**
+1. Find **PA0** pin on chip diagram
+2. Click **PA0** → Select **ADC1_INP16**
+3. Find **PC0** pin on chip diagram
+4. Click **PC0** → Select **ADC2_INP10**
+
+**LED Pins (optional for status indication):**
+5. Find **PB0** → Select **GPIO_Output** → User Label: **LED_GREEN**
+6. Find **PE1** → Select **GPIO_Output** → User Label: **LED_YELLOW**
+7. Find **PB14** → Select **GPIO_Output** → User Label: **LED_RED**
+
+**Verification:**
+- PA0 shows **ADC1_INP16** (green/yellow)
+- PC0 shows **ADC2_INP10** (green/yellow)
+- LED pins (if configured) show **GPIO_Output**
+
+**Why this step first:**
+- Enables ADC peripherals in CubeMX
+- Unlocks ADC configuration options
+
+---
+
+### Step 5: Configure ADC1 (Master - Voltage Channel)
+
+**In STM32CubeMX:**
+1. Left sidebar: **Analog → ADC1**
+2. Mode section:
+   - **IN16 (PA0_C)** should already show as enabled
+   - Verify: **Single-ended**
+3. Configuration → **Parameter Settings:**
+   - **Clock Prescaler:** Asynchronous clock / 4
+   - **Resolution:** 16 bits
+   - **Data Alignment:** Right alignment
+   - **Scan Conversion Mode:** Disabled
+   - **Continuous Conversion:** Disabled
+   - **Discontinuous Conversion:** Disabled
+4. Configuration → **ADC_Regular_ConversionMode:**
+   - **External Trigger Conversion Source:** Timer 6 Trigger Out event
+   - **External Trigger Conversion Edge:** Rising edge
+   - **Rank 1:**
+     - **Channel:** Channel 16
+     - **Sampling Time:** 64.5 cycles
+
+**Timing Calculation:**
+```
+ADC_Clock = 64 MHz (from per_ck, configured in Step 8)
+Sample_Time = 64.5 cycles
+Conversion_Time = 16.5 cycles (16-bit)
+Total = (64.5 + 16.5) / 64 MHz = 1.27 µs
+Available @ 10kHz = 100 µs → Margin: 98.73 µs ✓
+```
+
+**Verification:**
+- Resolution = "16 bits"
+- External Trigger = "Timer 6 Trigger Out event"
+- Sampling Time = "64.5 Cycles"
+
+**Why 16-bit:**
+- H755ZI-Q supports 16-bit ADC (65536 levels vs 4096 for 12-bit)
+- Better accuracy and resolution for power measurements
+- Suitable for IEC 61000-4-30 Class A compliance
+
+---
+
+### Step 6: Configure ADC2 (Slave - Current Channel)
+
+**In STM32CubeMX:**
+1. Left sidebar: **Analog → ADC2**
+2. Mode section:
+   - **IN10 (PC0)** should already show as enabled
+   - Verify: **Single-ended**
+3. Configuration → **Parameter Settings:**
+   - **Clock Prescaler:** Asynchronous clock / 4 (same as ADC1)
+   - **Resolution:** 16 bits
+   - **Data Alignment:** Right alignment
+   - **Scan Conversion Mode:** Disabled
+   - **Continuous Conversion:** Disabled
+4. Configuration → **ADC_Regular_ConversionMode:**
+   - **External Trigger Conversion Source:** ⚠️ **Software Trigger** (do NOT set external trigger!)
+   - **Rank 1:**
+     - **Channel:** Channel 10
+     - **Sampling Time:** 64.5 cycles (match ADC1)
+
+**Verification:**
+- Resolution = "16 bits"
+- External Trigger = "Software Trigger" (NOT Timer 6!)
+- Sampling Time = "64.5 Cycles" (matches ADC1)
+
+**⚠️ CRITICAL:**
+- **DO NOT configure external trigger for ADC2**
+- ADC2 is slave - automatically triggered by ADC1 via multi-mode
+- Setting external trigger breaks synchronization
+
+---
+
+### Step 7: Configure ADC Multi-Mode (Dual Simultaneous)
+
+**In STM32CubeMX:**
+1. Go to **ADC1** configuration (NOT ADC2!)
+2. In **Mode** section at top, find multi-mode dropdown
+3. Configure:
+   - **Mode:** **"Dual mode combined regular simultaneous"** (or similar with "simultaneous")
+   - **Delay between 2 sampling phases:** **1.5 cycle** (minimum)
+   - **DMA Access Mode for Multi mode:** **"Enabled"** (or "DMA mode 1 enabled")
+
+**Verification:**
+- Mode shows "Dual...simultaneous"
+- Delay = "1.5 cycle"
+- DMA Access = "Enabled"
+
+**Why these settings:**
+- **Simultaneous mode:** Both ADCs sample at exact same instant (<10 ns)
+- **1.5 cycle delay:** Minimum hardware delay for true synchronization
+- **DMA Access Enabled:** Packs both results into 32-bit word: `[ADC2(31:16) | ADC1(15:0)]`
+
+**Why simultaneous (not interleaved):**
+- Simultaneous: Both ADCs sample same moment - for two separate signals
+- Interleaved: ADCs alternate for faster sampling of ONE signal - not needed here
+
+---
+
+### Step 8: Configure ADC Clock and USART Clock Source
+
+**In STM32CubeMX - Clock Configuration Tab:**
+
+**ADC Clock:**
+1. Find **ADC Clock** section (should now be active)
+2. **ADC Clock Mux:** Select **per_ck** (peripheral clock)
+3. Result should show **64 MHz** (green)
+
+**⚠️ CRITICAL - USART Clock:**
+4. Find **USART2,3,4,5,7,8 Clock Mux**
+5. Click dropdown (default shows "PCLK1 (D2)")
+6. Select: **HSI** (64 MHz)
+
+**Verification:**
+- ADC Clock = **64 MHz** (green)
+- USART Clock = **HSI** (64 MHz)
+
+**Why HSI for USART:**
+- Default (PCLK1 = 50 MHz) cannot achieve accurate 921600 baud
+- HSI (64 MHz) provides clean divisor for 921600 baud
+- Prevents data corruption (without this, UART outputs garbage)
+
+**What happens if you skip USART clock:**
+- UART transmits corrupted data (only 0x1c, 0xe0, 0xfc bytes)
+- No valid sync markers
+- Must manually edit `usart.c` after every code generation
+
+---
+
+### Step 9: Configure TIM6 for 10 kHz ADC Triggering
+
+**In STM32CubeMX:**
+1. Navigate to **Timers → TIM6**
+2. Mode section:
+   - ☑ Check **"Activated"**
+3. Configuration → **Parameter Settings:**
+   - **Prescaler (PSC):** **19**
+   - **Counter Period (ARR):** **999**
+   - **Counter Mode:** Up
+   - **Auto-reload preload:** ☑ **Enable**
+4. Configuration → **Trigger Output (TRGO) Parameters:**
+   - **Trigger Event Selection:** **Update Event**
+
+**Calculation:**
+```
+Timer_Clock = 200 MHz (APB1 Timer clock from Step 3)
+Trigger_Freq = Timer_Clock / ((PSC+1) × (ARR+1))
+10,000 Hz = 200,000,000 / ((19+1) × (999+1))
+10,000 Hz = 200,000,000 / 20,000 ✓
+```
+
+**Verification:**
+- TIM6 shows "Activated"
+- PSC = 19, ARR = 999
+- Trigger Event Selection = Update Event
+
+**Why these values:**
+- Different from L476RG (which uses PSC=7, ARR=999)
+- H755ZI-Q has 200 MHz timer clock (vs 80 MHz on L476RG)
+- TIM6 generates internal TRGO pulse every 100 µs (10 kHz)
+
+---
+
+### Step 10: Configure DMA for ADC1
+
+**In STM32CubeMX:**
+1. Navigate to **Analog → ADC1**
+2. Click **"DMA Settings"** tab
+3. Click **"Add"** button
+4. Configure DMA Request:
+   - **Request:** ADC1
+   - **Stream:** (auto-assigned by CubeMX)
+   - **Direction:** Peripheral to Memory
+   - **Priority:** Very High
+5. Expand DMA Request settings:
+   - **Mode:** **Circular**
+   - **Increment Address:**
+     - ☑ **Memory:** Enabled
+     - ☐ **Peripheral:** Disabled
+   - **Data Width:**
+     - **Peripheral:** **Word (32-bit)** ⚠️ Critical for dual mode
+     - **Memory:** **Word (32-bit)**
+
+**Verification:**
+- Mode = "Circular"
+- Data Width = "Word" for both Peripheral and Memory
+- Priority = "Very High"
+
+**Why 32-bit:**
+- Dual ADC mode packs both results: `[ADC2(31:16) | ADC1(15:0)]`
+- Single DMA transfer captures both channels
+- Memory buffer must be `uint32_t` array
+
+---
+
+### Step 11: Configure USART3 for Data Transmission
+
+**In STM32CubeMX:**
+1. Left sidebar: **Connectivity → USART3**
+2. Mode: **Asynchronous**
+3. Configuration → **Parameter Settings:**
+   - **Baud Rate:** 921600 Bits/s
+   - **Word Length:** 8 Bits
+   - **Parity:** None
+   - **Stop Bits:** 1
+   - **Data Direction:** Transmit Only (or Transmit and Receive)
+   - **Over Sampling:** 16 Samples
+4. **Pin Configuration (verify in Pinout View):**
+   - **PD8** should show **USART3_TX** (yellow/green)
+   - **PD9** should show **USART3_RX** (yellow/green)
+   - If not auto-assigned: manually assign PD8 → USART3_TX, PD9 → USART3_RX
+
+**Verification:**
+- Mode = "Asynchronous"
+- Baud Rate = "921600"
+- PD8/PD9 assigned to USART3
+
+**Why USART3 (not USART2):**
+- H755ZI-Q has ST-Link VCP hardwired to PD8/PD9 (USART3)
+- Board Selector pre-assigns these pins to USART3
+- Using USART3 enables USB cable for power + data
+
+---
+
+### Step 12: Configure DMA for USART3
+
+**In STM32CubeMX:**
+1. In USART3 configuration, click **"DMA Settings"** tab
+2. Click **"Add"** button
+3. Configure:
+   - **Request:** USART3_TX
+   - **Stream:** (auto-assigned)
+   - **Direction:** Memory to Peripheral
+   - **Priority:** Medium
+4. Expand settings:
+   - **Mode:** Normal (not circular)
+   - **Increment Address:**
+     - ☑ **Memory:** Enabled
+     - ☐ **Peripheral:** Disabled
+   - **Data Width:**
+     - **Peripheral:** Byte
+     - **Memory:** Byte
+
+**Verification:**
+- Mode = "Normal"
+- Direction = "Memory to Peripheral"
+- Data Width = "Byte"
+
+---
+
+### Step 13: Enable NVIC Interrupts
+
+**In STM32CubeMX:**
+1. Left sidebar: **System Core → NVIC**
+2. **NVIC** tab - Enable interrupts:
+   - ☑ **DMA1 stream0 global interrupt** (or stream assigned to ADC1)
+   - ☑ **DMA1 stream1 global interrupt** (or stream assigned to USART3_TX)
+   - ☑ **USART3 global interrupt**
+   - ☑ **ADC1 and ADC2 global interrupts**
+3. **Preemption Priorities:**
+   - **DMA interrupts:** Preemption Priority = **0** (highest)
+   - **ADC interrupts:** Preemption Priority = **1**
+   - **USART3:** Preemption Priority = **2**
+   - **Sub Priority:** Leave at **0**
+
+**Verification:**
+- All 4 interrupt types enabled (checked)
+- DMA has priority 0 (highest)
+
+**Why these priorities:**
+- DMA highest to prevent data loss
+- ADC mid-priority for callbacks
+- USART lowest (non-time-critical)
+
+---
+
+### Step 14: Project Settings and Code Generation
+
+**In STM32CubeMX:**
+1. Click **"Project Manager"** tab
+2. **Project** section:
+   - **Project Name:** (e.g., "PowerMeter_H755ZIQ")
+   - **Toolchain/IDE:** STM32CubeIDE
+   - **Project Location:** (verify correct path)
+3. **Code Generator** tab:
+   - ☑ Copy only necessary library files
+   - ☑ Generate peripheral initialization as pair of .c/.h files
+   - ☐ Keep user code when regenerating
+4. **Advanced Settings** tab:
+   - Verify all peripherals use **HAL** (not LL)
+5. Click **"GENERATE CODE"** button
+
+**Verification:**
+- Code generation successful
+- No errors in console
+- Files created in `CM7/Core/Src/` and `CM7/Core/Inc/`
+
+---
+
+### Step 15: Post-Generation Code Fixes (CRITICAL)
+
+⚠️ **These manual fixes are required after EVERY code generation:**
+
+**Fix 1: Disable Dual-Core Boot Sync (if using M7 only)**
+
+File: `CM7/Core/Src/main.c` (around line 44)
+
+Find:
+```c
+#define DUAL_CORE_BOOT_SYNC_SEQUENCE
+```
+
+Change to:
+```c
+// #define DUAL_CORE_BOOT_SYNC_SEQUENCE  // DISABLED - M4 not used
+```
+
+**Why:** Prevents M7 from waiting forever for M4 core to boot
+
+---
+
+**Fix 2: Verify USART Clock (only if Step 8 was skipped)**
+
+File: `CM7/Core/Src/usart.c` (around line 85)
+
+**If you configured USART clock to HSI in Step 8, this should be correct already.**
+
+If code shows:
+```c
+PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_D2PCLK1;
+```
+
+Change to:
+```c
+PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_HSI;
+```
+
+**Why:** 50 MHz PCLK1 cannot achieve accurate 921600 baud. HSI (64 MHz) works perfectly.
+
+---
+
+**Fix 3: Verify ADC DMA Mode (if needed)**
+
+File: `CM7/Core/Src/adc.c` (around line 60 in `MX_ADC1_Init()`)
+
+Check for:
+```c
+hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DR;
+```
+
+If it shows `ADC_CONVERSIONDATA_DR`, change to:
+```c
+hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
+```
+
+**Why:** Ensures ADC uses DMA in circular mode (CubeMX sometimes generates wrong value)
+
+---
+
+**Verification After Fixes:**
+- Code builds without errors
+- No undefined reference warnings
+- Ready for application code
+
+---
+
+## Configuration Summary
+
+### Pin Assignment Summary
+
+| Pin | Function | ADC Channel | Purpose |
+|-----|----------|-------------|---------|
+| PA0_C | ADC1_INP16 | Channel 16 | Voltage sensor input |
+| PC0 | ADC2_INP10 | Channel 10 | Current sensor input |
+| PD8 | USART3_TX | - | Serial transmit to PC |
+| PD9 | USART3_RX | - | Serial receive from PC |
+| PB0 | GPIO_Output | - | Green LED (optional) |
+| PE1 | GPIO_Output | - | Yellow LED (optional) |
+| PB14 | GPIO_Output | - | Red LED (optional) |
+
+### Peripheral Configuration Summary
+
+| Peripheral | Setting | Value |
+|------------|---------|-------|
+| **System Clock** | SYSCLK (M7) | 200 MHz |
+| | APB1 Timer Clock | 200 MHz |
+| | HSE | 25 MHz (external crystal) |
+| **TIM6** | Prescaler | 19 |
+| | Counter Period | 999 |
+| | Trigger Output | Update Event |
+| **ADC1** | Resolution | 16 bits |
+| | Trigger Source | Timer 6 TRGO |
+| | Sampling Time | 64.5 cycles |
+| | Clock | 64 MHz (per_ck) |
+| **ADC2** | Resolution | 16 bits |
+| | Sampling Time | 64.5 cycles |
+| | Clock | 64 MHz (per_ck) |
+| **Multi-Mode** | Mode | Dual simultaneous |
+| | DMA Access | Enabled |
+| | Delay | 1.5 cycles |
+| **DMA (ADC1)** | Mode | Circular |
+| | Data Width | Word (32-bit) |
+| | Priority | Very High |
+| **USART3** | Baud Rate | 921600 |
+| | Word Length | 8 bits |
+| | Parity | None |
+| | Clock Source | HSI (64 MHz) ⚠️ |
+| **DMA (USART3)** | Mode | Normal |
+| | Data Width | Byte |
+| | Priority | Medium |
+
+### Key Differences from L476RG
+
+| Parameter | L476RG | H755ZI-Q |
+|-----------|--------|----------|
+| ADC Resolution | 12-bit | **16-bit** |
+| CPU Clock | 80 MHz | **200 MHz** |
+| ADC Clock | 20 MHz | **64 MHz** |
+| Timer Clock | 80 MHz | **200 MHz** |
+| TIM6 PSC | 7 | **19** |
+| TIM6 ARR | 999 | 999 |
+| Voltage Pin | PA0 (IN5) | **PA0_C (INP16)** |
+| Current Pin | PA1 (IN6) | **PC0 (INP10)** |
+| UART | USART2 | **USART3** |
+| UART Pins | PA2/PA3 | **PD8/PD9** |
+
+### Calculated Timings
+
+```
+Sampling Rate:    10,000 Hz (per channel, simultaneous)
+Sample Period:    100 µs
+ADC Conv Time:    1.27 µs per channel (16-bit @ 64 MHz)
+UART Tx Time:     ~43 ms per 1000-sample buffer (dual-channel @ 921600 baud)
+Buffer Duration:  100 ms per half (1000 samples)
+```
