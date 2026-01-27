@@ -5,8 +5,8 @@ ADC_CONFIG = {
     "bits": 16,  # ADC resolution (16-bit for H755ZI-Q)
     "max_value": 65535,  # Maximum ADC value (2^16 - 1)
     "vref": 3.3,  # ADC reference voltage (V)
-    "sampling_freq": 10000,  # Sampling frequency (Hz)
-    "samples_per_packet": 1000,  # Samples per channel per packet
+    "sampling_freq": 10256,  # Sampling frequency (Hz) - 10.24 kHz for IEC 61000-4-7
+    "samples_per_packet": 1024,  # Samples per channel per packet (power-of-2)
 }
 
 # Voltage sensor configuration (ZMPT101B default)

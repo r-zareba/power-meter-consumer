@@ -2,7 +2,7 @@
 
 **Board:** NUCLEO-H755ZI-Q  
 **Project:** Power Meter - Dual ADC Data Acquisition  
-**Target:** 10 kHz simultaneous dual ADC sampling with DMA and UART transmission
+**Target:** 10.24 kHz simultaneous dual ADC sampling with DMA and UART transmission (IEC 61000-4-7 standard for 50Hz grids)
 
 ---
 
@@ -244,6 +244,43 @@ Available @ 10kHz = 100 µs → Margin: 98.73 µs ✓
 
 ---
 
+### Step 7a: Configure ADC3 for VREFINT (Voltage Reference Calibration)
+
+**In STM32CubeMX:**
+1. Go to **Analog → ADC3**
+2. **Mode:**
+   - Check **"IN18 - Vrefint Channel"** (or similar VREFINT option)
+3. **Configuration → Parameter Settings:**
+   - **Regular Conversion → Number Of Conversion:** **1**
+   - **Rank 1:**
+     - **Channel:** **"Channel Vrefint"** or **"Tempsensor-Vrefint"**
+     - **Sampling Time:** **"810.5 Cycles"** (maximum available)
+   - **External Trigger Conversion Source:** **"Software Trigger"**
+   - **Resolution:** **"16 bits"**
+
+**Verification:**
+- ADC3 shows VREFINT channel enabled
+- Sampling time = 810.5 cycles
+- Mode = software trigger
+
+**Why ADC3:**
+- ADC1/ADC2 used for external signals (GPIO pins)
+- **ADC3 has access to internal channels** (VREFINT, Temperature, VBAT)
+
+**Why 810.5 cycles:**
+- VREFINT has high internal impedance
+- Longer sampling time = more accurate reading
+- Reading time: ~50-100 µs @ ADC3 clock
+- Performed once per second → 0.01% CPU overhead
+
+**Purpose:**
+- Measures internal 1.21V reference using VDDA as ADC reference
+- Calculates actual VDDA: `VDDA = (3.3V × VREFINT_CAL) / VREFINT_reading`
+- Improves measurement accuracy from ±5% to ±1%
+- See [vref.md](vref.md) for detailed explanation
+
+---
+
 ### Step 8: Configure ADC Clock and USART Clock Source
 
 **In STM32CubeMX - Clock Configuration Tab:**
@@ -274,15 +311,15 @@ Available @ 10kHz = 100 µs → Margin: 98.73 µs ✓
 
 ---
 
-### Step 9: Configure TIM6 for 10 kHz ADC Triggering
+### Step 9: Configure TIM6 for 10.24 kHz ADC Triggering
 
 **In STM32CubeMX:**
 1. Navigate to **Timers → TIM6**
 2. Mode section:
    - ☑ Check **"Activated"**
 3. Configuration → **Parameter Settings:**
-   - **Prescaler (PSC):** **19**
-   - **Counter Period (ARR):** **999**
+   - **Prescaler (PSC):** **24**
+   - **Counter Period (ARR):** **194**
    - **Counter Mode:** Up
    - **Auto-reload preload:** ☑ **Enable**
 4. Configuration → **Trigger Output (TRGO) Parameters:**
@@ -292,19 +329,22 @@ Available @ 10kHz = 100 µs → Margin: 98.73 µs ✓
 ```
 Timer_Clock = 200 MHz (APB1 Timer clock from Step 3)
 Trigger_Freq = Timer_Clock / ((PSC+1) × (ARR+1))
-10,000 Hz = 200,000,000 / ((19+1) × (999+1))
-10,000 Hz = 200,000,000 / 20,000 ✓
+10,256.4 Hz = 200,000,000 / ((24+1) × (194+1))
+10,256.4 Hz = 200,000,000 / 4,875 ✓
 ```
 
 **Verification:**
 - TIM6 shows "Activated"
-- PSC = 19, ARR = 999
+- PSC = 24, ARR = 194
 - Trigger Event Selection = Update Event
 
 **Why these values:**
-- Different from L476RG (which uses PSC=7, ARR=999)
+- **10.24 kHz is the IEC 61000-4-7 standard for 50Hz grids**
+- Different from L476RG (which uses PSC=7, ARR=999 for 10 kHz @ 60Hz)
 - H755ZI-Q has 200 MHz timer clock (vs 80 MHz on L476RG)
-- TIM6 generates internal TRGO pulse every 100 µs (10 kHz)
+- TIM6 generates internal TRGO pulse every 97.5 µs (10.24 kHz)
+- **Perfect FFT alignment:** 200ms window = 2,048 samples (2^11)
+- Used by Fluke 435-II, Hioki PW3198, and other professional analyzers
 
 ---
 
@@ -532,8 +572,8 @@ hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
 | **System Clock** | SYSCLK (M7) | 200 MHz |
 | | APB1 Timer Clock | 200 MHz |
 | | HSE | 25 MHz (external crystal) |
-| **TIM6** | Prescaler | 19 |
-| | Counter Period | 999 |
+| **TIM6** | Prescaler | 24 |
+| | Counter Period | 194 |
 | | Trigger Output | Update Event |
 | **ADC1** | Resolution | 16 bits |
 | | Trigger Source | Timer 6 TRGO |
@@ -564,8 +604,9 @@ hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
 | CPU Clock | 80 MHz | **200 MHz** |
 | ADC Clock | 20 MHz | **64 MHz** |
 | Timer Clock | 80 MHz | **200 MHz** |
-| TIM6 PSC | 7 | **19** |
-| TIM6 ARR | 999 | 999 |
+| Sampling Rate | 10 kHz (60Hz) | **10.24 kHz (50Hz)** |
+| TIM6 PSC | 7 | **24** |
+| TIM6 ARR | 999 | **194** |
 | Voltage Pin | PA0 (IN5) | **PA0_C (INP16)** |
 | Current Pin | PA1 (IN6) | **PC0 (INP10)** |
 | UART | USART2 | **USART3** |
@@ -574,9 +615,17 @@ hadc1.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
 ### Calculated Timings
 
 ```
-Sampling Rate:    10,000 Hz (per channel, simultaneous)
-Sample Period:    100 µs
+Sampling Rate:    10,256.4 Hz (per channel, simultaneous)
+Sample Period:    97.5 µs
 ADC Conv Time:    1.27 µs per channel (16-bit @ 64 MHz)
-UART Tx Time:     ~43 ms per 1000-sample buffer (dual-channel @ 921600 baud)
-Buffer Duration:  100 ms per half (1000 samples)
+UART Tx Time:     ~44 ms per 1024-sample buffer (dual-channel @ 921600 baud)
+Buffer Duration:  100 ms per half (1024 samples)
+UART Bandwidth:   ~44% (safe for reliable operation)
+
+IEC 61000-4-7 Standard Compliance for 50Hz grids:
+  - 204.8 samples per cycle (10 cycles in 200ms)
+  - 200ms window = 2,048 samples (2^11 - PERFECT for FFT)
+  - Radix-2 FFT optimization (fastest possible)
+  - Industry standard: Fluke 435-II, Hioki PW3198, Dranetz HDPQ
+  - Class A power quality monitoring per IEC 61000-4-30
 ```

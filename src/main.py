@@ -24,6 +24,9 @@ def parse_args():
     parser.add_argument(
         "--raw", action="store_true", help="Display raw bytes (no parsing)"
     )
+    parser.add_argument(
+        "--plot", action="store_true", help="Plot first analysis window after sync"
+    )
 
     return parser.parse_args()
 
@@ -66,7 +69,7 @@ def main():
     print(f"Connected to serial port {args.port} at {args.baud} baud")
 
     try:
-        receiver.receive_continuous()
+        receiver.receive_continuous(plot_first_window=args.plot)
     except KeyboardInterrupt:
         print("\nStopped by user")
     except Exception as e:

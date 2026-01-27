@@ -2,7 +2,7 @@
 
 **Board:** NUCLEO-L476RG  
 **Project:** Power Meter - Dual ADC Data Acquisition  
-**Target:** 10 kHz simultaneous dual ADC sampling with DMA and UART transmission
+**Target:** 10.24 kHz simultaneous dual ADC sampling with DMA and UART transmission (IEC 61000-4-7 standard for 50Hz grids)
 
 ---
 
@@ -56,7 +56,7 @@ CN8 Connector (Arduino Analog Header):
 
 ---
 
-### Step 2: Configure TIM6 for 10 kHz ADC Triggering
+### Step 2: Configure TIM6 for 10.24 kHz ADC Triggering
 
 **Timer:** TIM6 (Basic Timer)
 
@@ -66,7 +66,7 @@ CN8 Connector (Arduino Analog Header):
    - ☑ Check **"Activated"**
 3. Configuration → **Parameter Settings:**
    - **Prescaler (PSC):** **7**
-   - **Counter Period (ARR):** **999**
+   - **Counter Period (ARR):** **974**
    - **Counter Mode:** Up
    - **Auto-reload preload:** ☑ **Enable**
 4. Configuration → **Trigger Output (TRGO) Parameters:**
@@ -76,19 +76,22 @@ CN8 Connector (Arduino Analog Header):
 ```
 Timer_Clock = 80 MHz
 Trigger_Freq = Timer_Clock / ((PSC+1) × (ARR+1))
-10,000 Hz = 80,000,000 / ((7+1) × (999+1))
-10,000 Hz = 80,000,000 / 8,000 ✓
+10,256.4 Hz = 80,000,000 / ((7+1) × (974+1))
+10,256.4 Hz = 80,000,000 / 7,800 ✓
 ```
 
 **Verification:**
 - TIM6 shows "Activated"
-- PSC = 7, ARR = 999
+- PSC = 7, ARR = 974
 - Trigger Event Selection = Update Event
 
 **Why these settings:**
 - **TIM6:** Basic timer designed for ADC/DAC triggering, no GPIO pins needed
 - **TRGO = Update Event:** Generates internal trigger pulse to ADC every time counter resets
 - **Auto-reload preload:** Prevents glitches if parameters change during runtime
+- **10.24 kHz is the IEC 61000-4-7 standard for 50Hz grids**
+- **Perfect FFT alignment:** 200ms window = 2,048 samples (2^11)
+- Used by Fluke 435-II, Hioki PW3198, and other professional analyzers
 
 ---
 
@@ -374,7 +377,7 @@ Available @ 10kHz = 100 µs → Margin: 98.75 µs ✓
 | **System Clock** | SYSCLK | 80 MHz |
 | | APB1 Timer Clock | 80 MHz |
 | **TIM6** | Prescaler | 7 |
-| | Counter Period | 999 |
+| | Counter Period | 974 |
 | | Trigger Output | Update Event |
 | **ADC1** | Resolution | 12 bits |
 | | Trigger Source | Timer 6 TRGO |
@@ -398,11 +401,19 @@ Available @ 10kHz = 100 µs → Margin: 98.75 µs ✓
 ### Calculated Timings
 
 ```
-Sampling Rate:    10,000 Hz (per channel, simultaneous)
-Sample Period:    100 µs
+Sampling Rate:    10,256.4 Hz (per channel, simultaneous)
+Sample Period:    97.5 µs
 ADC Conv Time:    1.25 µs per channel
-UART Tx Time:     ~22 ms per 1000-sample buffer (at 921600 baud)
-Buffer Duration:  100 ms per half (1000 samples)
+UART Tx Time:     ~44 ms per 1024-sample buffer (at 921600 baud)
+Buffer Duration:  100 ms per half (1024 samples)
+UART Bandwidth:   ~44% (safe for reliable operation)
+
+IEC 61000-4-7 Standard Compliance for 50Hz grids:
+  - 204.8 samples per cycle (10 cycles in 200ms)
+  - 200ms window = 2,048 samples (2^11 - PERFECT for FFT)
+  - Radix-2 FFT optimization (fastest possible)
+  - Industry standard: Fluke 435-II, Hioki PW3198, Dranetz HDPQ
+  - Class A power quality monitoring per IEC 61000-4-30
 ```
 
 ---

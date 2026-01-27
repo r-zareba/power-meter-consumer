@@ -51,8 +51,10 @@ UART_HandleTypeDef huart2;
 DMA_HandleTypeDef hdma_usart2_tx;
 
 /* USER CODE BEGIN PV */
-#define BUFFER_SIZE 2000      // 200ms at 10kHz (IEC 61000-4-7 compliant)
-#define HALF_BUFFER_SIZE 1000 // 100ms per packet
+#define BUFFER_SIZE                                                            \
+  2048 // 200ms at 10.24kHz (IEC 61000-4-7 perfect FFT window: 2^11)
+#define HALF_BUFFER_SIZE                                                       \
+  1024 // 100ms per packet (power-of-2 for efficient processing)
 
 /**
  * UART Packet Structure (4010 bytes total)
@@ -442,9 +444,10 @@ static void MX_TIM6_Init(void) {
 
   /* USER CODE END TIM6_Init 1 */
   htim6.Instance = TIM6;
-  htim6.Init.Prescaler = 7;
+  htim6.Init.Prescaler = 7; // 10.24 kHz: (PSC+1) = 8
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 999;
+  htim6.Init.Period =
+      974; // 10.24 kHz: (ARR+1) = 975, Freq = 80MHz/8/975 = 10,256.4 Hz
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK) {
     Error_Handler();

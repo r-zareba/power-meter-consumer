@@ -19,7 +19,7 @@ class ADCReceiver:
         "samples_per_packet"
     ]  # Samples per channel per packet
     ANALYSIS_WINDOW = (
-        2000  # IEC 61000-4-7 compliant: 200ms at 10kHz (2 packets per channel)
+        2048  # IEC 61000-4-7 compliant: 200ms at 10.24kHz (2^11 samples - perfect FFT)
     )
 
     def __init__(self, port: str, baudrate: int):
@@ -154,7 +154,7 @@ class ADCReceiver:
             self.error_count += 1
             return None
 
-        # Verify checksum
+        # Verify checksum (header: seq + count)
         calculated_crc = self.calculate_crc16(header + data_bytes)
         if calculated_crc != checksum:
             self.error_count += 1
@@ -181,43 +181,92 @@ class ADCReceiver:
             "timestamp": time.time(),
         }
 
-    def process_analysis_window(self, voltage: list, current: list):
-        """
-        Execute power analysis on 2000-sample window (200ms at 10kHz).
-        IEC 61000-4-7 compliant analysis window.
+    def adc_to_voltage(self, adc_value: float, vdda_mv: float = 3300.0) -> float:
+        """Convert ADC value to voltage (V)
 
         Args:
-            voltage: List of 2000 voltage ADC samples (ADC1)
-            current: List of 2000 current ADC samples (ADC2)
+            adc_value: Raw ADC value (0-65535)
+            vdda_mv: Reference voltage in millivolts (fixed at 3300 mV)
 
         Returns:
-            dict: Statistics including v_mean, v_rms, i_mean, i_rms
+            float: Voltage in range 0-3.3V
+        """
+        return (adc_value / ADC_CONFIG["max_value"]) * (vdda_mv / 1000.0)
+
+    def adc_to_current(self, adc_value: float, vdda_mv: float = 3300.0) -> float:
+        """Convert ADC value to voltage (V)
+
+        Note: This converts to voltage, not current, as sensor is not yet applied.
+        Current channel ADC also outputs 0-VDDA range.
+
+        Args:
+            adc_value: Raw ADC value (0-65535)
+            vdda_mv: Reference voltage in millivolts (fixed at 3300 mV)
+
+        Returns:
+            float: Voltage in range 0-3.3V
+        """
+        return (adc_value / ADC_CONFIG["max_value"]) * (vdda_mv / 1000.0)
+
+    def process_analysis_window(self, voltage: list, current: list, vdda_mv: float):
+        """
+        Execute power analysis on 2048-sample window (200ms at 10.24kHz).
+        IEC 61000-4-7 compliant analysis window with perfect 2^11 FFT alignment.
+
+        Args:
+            voltage: List of 2048 voltage ADC samples (ADC1)
+            current: List of 2048 current ADC samples (ADC2)
+            vdda_mv: Reference voltage in millivolts (fixed at 3300 mV)
+
+        Returns:
+            dict: Statistics including mean and RMS values
         """
         voltage_array = np.array(voltage, dtype=np.float64)
         current_array = np.array(current, dtype=np.float64)
 
+        # Calculate statistics in ADC domain
+        v_mean_adc = np.mean(voltage_array)
+        v_rms_adc = np.sqrt(np.mean(voltage_array**2))
+        i_mean_adc = np.mean(current_array)
+        i_rms_adc = np.sqrt(np.mean(current_array**2))
+
+        # Convert to physical units using calibrated VDDA
+        v_mean = self.adc_to_voltage(v_mean_adc, vdda_mv)
+        v_rms = self.adc_to_voltage(v_rms_adc, vdda_mv)
+        i_mean = self.adc_to_current(i_mean_adc, vdda_mv)
+        i_rms = self.adc_to_current(i_rms_adc, vdda_mv)
+
         return {
-            "v_mean": np.mean(voltage_array),
-            "v_rms": np.sqrt(np.mean(voltage_array**2)),
-            "i_mean": np.mean(current_array),
-            "i_rms": np.sqrt(np.mean(current_array**2)),
+            "v_mean_adc": v_mean_adc,
+            "v_rms_adc": v_rms_adc,
+            "i_mean_adc": i_mean_adc,
+            "i_rms_adc": i_rms_adc,
+            "v_mean": v_mean,
+            "v_rms": v_rms,
+            "i_mean": i_mean,
+            "i_rms": i_rms,
         }
 
-    def plot_samples(self, voltage: list, current: list):
+    def plot_samples(self, voltage: list, current: list, vdda_mv: float = 3300.0):
         """
         Debug function: Plot voltage and current samples (one-time scatter plot)
 
         Args:
             voltage: List of voltage ADC samples
             current: List of current ADC samples
+            vdda_mv: Actual VDDA voltage in millivolts (from VREFINT calibration)
         """
+        # Convert ADC samples to voltage values using calibrated VDDA
+        voltage_v = [self.adc_to_voltage(v, vdda_mv) for v in voltage]
+        current_v = [self.adc_to_current(c, vdda_mv) for c in current]
+
         # Create subplots with Plotly
         fig = make_subplots(
             rows=2,
             cols=1,
             subplot_titles=(
-                f"Voltage Samples ({len(voltage)} samples, 200ms)",
-                f"Current Samples ({len(current)} samples, 200ms)",
+                f"Channel 1 (Voltage) - {len(voltage)} samples, 200ms",
+                f"Channel 2 (Current) - {len(current)} samples, 200ms",
             ),
             vertical_spacing=0.12,
         )
@@ -225,11 +274,11 @@ class ADCReceiver:
         # Voltage scatter plot
         fig.add_trace(
             go.Scattergl(
-                x=list(range(len(voltage))),
-                y=voltage,
+                x=list(range(len(voltage_v))),
+                y=voltage_v,
                 mode="markers",
                 marker=dict(size=2, opacity=0.6),
-                name="Voltage",
+                name="CH1",
             ),
             row=1,
             col=1,
@@ -238,11 +287,11 @@ class ADCReceiver:
         # Current scatter plot
         fig.add_trace(
             go.Scattergl(
-                x=list(range(len(current))),
-                y=current,
+                x=list(range(len(current_v))),
+                y=current_v,
                 mode="markers",
                 marker=dict(size=2, opacity=0.6),
-                name="Current",
+                name="CH2",
             ),
             row=2,
             col=1,
@@ -250,17 +299,21 @@ class ADCReceiver:
 
         # Update layout
         fig.update_xaxes(title_text="Sample", row=2, col=1)
-        fig.update_yaxes(title_text="Voltage (ADC)", row=1, col=1)
-        fig.update_yaxes(title_text="Current (ADC)", row=2, col=1)
+        fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
+        fig.update_yaxes(title_text="Voltage (V)", row=2, col=1)
 
         fig.update_layout(
-            height=600, showlegend=False, title_text="ADC Samples Analysis Window"
+            height=600, showlegend=False, title_text="Voltage Samples Analysis Window"
         )
 
         fig.show()
 
-    def receive_continuous(self):
-        """Continuously receive packets and calculates stats every 1 second"""
+    def receive_continuous(self, plot_first_window: bool = False):
+        """Continuously receive packets and calculates stats every 1 second
+
+        Args:
+            plot_first_window: If True, plot the first complete analysis window
+        """
 
         self.start_time = time.time()
         last_print_time = time.time()
@@ -270,8 +323,7 @@ class ADCReceiver:
         i_mean_sum = 0.0
         sample_count = 0
 
-        # Debug flag - set to True to plot first analysis window
-        plot_debug = False
+        # Debug flag - plot first analysis window if requested
         plotted = False
 
         print(f"Receiving data from {self.port} at {self.baudrate} baud...")
@@ -316,16 +368,16 @@ class ADCReceiver:
                     self.current_buffer = self.current_buffer[self.ANALYSIS_WINDOW :]
 
                     # DEBUG: Plot first analysis window
-                    if plot_debug and not plotted:
-                        self.plot_samples(voltage_window, current_window)
+                    if plot_first_window and not plotted:
+                        self.plot_samples(voltage_window, current_window, 3300.0)
                         plotted = True
 
                     # Get statistics from this window
-                    stats = self.process_analysis_window(voltage_window, current_window)
+                    stats = self.process_analysis_window(voltage_window, current_window, 3300.0)
 
-                    # Accumulate for 1-second average
-                    v_mean_sum += stats["v_mean"]
-                    i_mean_sum += stats["i_mean"]
+                    # Accumulate for 1-second average (using converted values)
+                    v_mean_sum += stats["v_rms"]  # Use RMS for AC measurements
+                    i_mean_sum += stats["i_rms"]
                     sample_count += 1
 
                 # Print average every 1 second
@@ -336,7 +388,7 @@ class ADCReceiver:
                         i_avg = i_mean_sum / sample_count
                         elapsed = current_time - self.start_time
                         print(
-                            f"[{elapsed:6.1f}s] V_avg={v_avg:7.1f} ADC, I_avg={i_avg:7.1f} ADC, Packets={self.packet_count:4d}, Errors={self.error_count:2d}"
+                            f"[{elapsed:6.1f}s] CH1_rms={v_avg:5.3f}V, CH2_rms={i_avg:5.3f}V, Pkts={self.packet_count:4d}, Err={self.error_count:2d}"
                         )
 
                         # Reset accumulators
