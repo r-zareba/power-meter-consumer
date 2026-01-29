@@ -122,66 +122,15 @@ Both boards follow the same general configuration pattern:
 
 ## VREF Calibration
 
-### The Problem
+The system uses **VREFINT** (internal voltage reference) on the H755ZI-Q board to measure actual VDDA and improve ADC accuracy
 
-STM32 ADC uses **VDDA** (analog supply voltage) as the reference for conversions:
+**Key points:**
+- ADC3 reads VREFINT once per second
+- Calculated VDDA (in millivolts) is included in every data packet
+- Python receiver uses this for accurate voltage conversions
+- No external components needed - fully automatic
 
-```
-Voltage = (ADC_reading / 65535) × VREF
-```
-
-**Typical assumption:** VREF = 3.3V  
-**Reality:** VDDA varies between 3.2V - 3.35V due to:
-- Voltage regulator tolerance (±3%)
-- Load-dependent voltage drop (±1%)
-- Temperature effects (±0.5%)
-
-**Impact:** Assuming 3.3V when actual VDDA is 3.25V → **1.5% systematic error** in all measurements
-
-### VREFINT Solution
-
-STM32 H755ZI includes **VREFINT** - a factory-calibrated ~1.21V precision internal reference:
-
-- **Temperature stable:** ±1mV over full range (-40°C to +105°C)
-- **No external pin needed:** Internal ADC channel
-- **Factory calibration:** Value stored in flash at `0x1FF1E860`
-
-**How it works:**
-```c
-// Read VREFINT using ADC3
-uint16_t vrefint_reading = ADC3_Read_VREFINT();
-
-// Calculate actual VDDA
-VDDA_actual = (1.21V × 65535) / vrefint_reading
-
-// Use VDDA_actual instead of assumed 3.3V
-voltage = (adc_reading / 65535) × VDDA_actual
-```
-
-**Key advantage:** Both signal measurements AND VREFINT use the same VDDA reference, so variations cancel out when calculating actual VDDA.
-
-### Implementation
-
-**ADC3 Configuration (CubeMX):**
-- Channel: VREFINT (Internal)
-- Sampling time: 810.5 cycles (VREFINT has high impedance)
-- Resolution: 16-bit
-- Mode: Software trigger (polled)
-
-**Reading frequency:** Once per second  
-**CPU overhead:** ~0.01% (50-100 µs per reading)
-
-**Data transmission:** VDDA value (in millivolts) included in every packet as `uint16_t vdda_mv`
-
-### Accuracy Improvement
-
-| Method | Typical Error |
-|--------|--------------|
-| Assume 3.3V (no calibration) | ±4-5% |
-| **VREFINT calibration** | **±1%** |
-| External precision reference (e.g., REF5030) | ±0.1-0.5% |
-
-**For this power meter:** VREFINT provides professional-grade accuracy (~1%) with zero additional hardware cost.
+For detailed information about VREFINT calibration, see [vref.md](readme/vref.md).
 
 ---
 
@@ -216,11 +165,10 @@ voltage = (adc_reading / 65535) × VDDA_actual
 - Validation: should match expected buffer size
 - Future flexibility for different buffer configurations
 
-**4. VDDA (2 bytes): ADC reference voltage in millivolts**
-- Measured via VREFINT internal reference
-- Updated every 1 second
+**4. VREF (2 bytes): ADC reference voltage in millivolts**
+- Measured via VREFINT internal reference (updated every 1 second)
 - Example: 3280 = 3.28V actual VDDA
-- Enables accurate voltage conversion: `V = (ADC / 65535) × (VDDA / 1000)`
+- See [vref.md](readme/vref.md) for calibration details
 
 **5. Voltage Data (N×2 bytes): ADC1 samples**
 - Array of 16-bit ADC values from voltage sensor

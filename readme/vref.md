@@ -25,16 +25,41 @@ STM32 includes **VREFINT**, a factory-calibrated ~1.21V precision reference:
 
 ### How VREFINT Calibration Works
 
+**The Calibration Process:**
+
+During manufacturing, STMicroelectronics:
+1. Powers each chip with precise VDDA = 3.3V at 30°C
+2. Reads the internal VREFINT (~1.21V) using the ADC
+3. Stores this ADC reading in flash memory (called **VREFINT_CAL**)
+
+During runtime, your firmware:
+1. Reads VREFINT with current VDDA (which may not be exactly 3.3V)
+2. Compares to factory calibration value
+3. Calculates actual VDDA
+
+**Formula:**
 ```c
-// Read VREFINT using the same ADC that measures your signals
-uint16_t vrefint_reading = ADC_Read_VREFINT();
+// Constants (provided by manufacturer)
+#define VREFINT_CAL_VREF 3300  // mV (VDDA during factory calibration)
+uint16_t vrefint_cal = *VREFINT_CAL_ADDR;  // Factory calibration value
+
+// Runtime measurement
+uint32_t vrefint_raw = HAL_ADC_GetValue(&hadc3);  // Current VREFINT reading
 
 // Calculate actual VDDA
-VDDA_actual = (1.21V × 65535) / vrefint_reading
-
-// Use VDDA_actual instead of assumed 3.3V
-voltage = (adc_reading / 65535) × VDDA_actual
+vdda_mv = (VREFINT_CAL_VREF * vrefint_cal) / vrefint_raw;
 ```
+
+**Example:**
+- Factory calibration: VDDA = 3.3V → VREFINT reads 52428 counts
+- Current reading: VREFINT reads 51200 counts
+- Calculation: (3300 × 52428) / 51200 = 3378 mV (actual VDDA = 3.378V)
+
+**Why it works:**
+- VREFINT is a stable ~1.21V that doesn't change with VDDA
+- If VDDA increases → ADC reading of VREFINT decreases (scale changes)
+- If VDDA decreases → ADC reading of VREFINT increases
+- By comparing current vs factory reading, we calculate the actual VDDA
 
 **Key insight:** Both your signal AND VREFINT are measured by the same ADC with the same VDDA reference, so variations cancel out when calculating VDDA.
 
@@ -55,11 +80,12 @@ voltage = (adc_reading / 65535) × VDDA_actual
 - Python waits for calibration data after connecting
 - **Overhead:** 0.005% CPU, one extra packet per 10 seconds
 
-### Option 3: Include VDDA in Every Packet (Recommended)
-- Read VREFINT periodically (e.g., once per second)
+### Option 3: Include VDDA in Every Packet ✅ **IMPLEMENTED**
+- Read VREFINT periodically (once per second via ADC3)
 - Include VDDA value (2 bytes) in every data packet
-- **Overhead:** 0.05% bandwidth (+2 bytes per 4010-byte packet)
+- **Overhead:** 0.05% bandwidth (+2 bytes per 4012-byte packet)
 - **Benefits:** Always works, no timing issues, real-time tracking
+- **Implementation:** H755ZI-Q board only (ADC3 reads VREFINT channel)
 
 ### Option 4: Request/Response Protocol
 - Python sends "REQUEST_CALIBRATION" command after connecting
@@ -73,8 +99,8 @@ Adding VREFINT calibration (Option 3):
 Current system: 20,000 ADC conversions/sec
 + VREFINT: +1 conversion/sec = +0.005% CPU overhead
 
-Current packet: 4010 bytes
-+ VDDA field: +2 bytes = +0.05% bandwidth overhead
+Packet size: 4010 → 4012 bytes (+2 bytes for vref_mv field)
+Bandwidth overhead: +0.05%
 
 UART timing: 43.6ms → 43.7ms per packet (+0.1ms)
 System margin: 52ms available → 51.9ms after change

@@ -35,6 +35,7 @@ class ADCReceiver:
         self.voltage_buffer = []
         self.current_buffer = []
         self.analysis_count = 0
+        self.current_vref_mv = 3300  # Most recent VREF value from packets
 
     def connect(self) -> bool:
         """Open serial port connection"""
@@ -115,12 +116,12 @@ class ADCReceiver:
             return None
 
         # Read header (after start marker)
-        header = self.serial.read(4)  # seq(2) + count(2)
-        if len(header) != 4:
+        header = self.serial.read(6)  # seq(2) + count(2) + vref_mv(2)
+        if len(header) != 6:
             self.error_count += 1
             return None
 
-        sequence, sample_count = struct.unpack("<HH", header)
+        sequence, sample_count, vref_mv = struct.unpack("<HHH", header)
 
         # Validate sample count
         if sample_count != self.EXPECTED_SAMPLES:
@@ -178,22 +179,23 @@ class ADCReceiver:
             "sequence": sequence,
             "voltage": list(voltage_samples),
             "current": list(current_samples),
+            "vref_mv": vref_mv,
             "timestamp": time.time(),
         }
 
-    def adc_to_voltage(self, adc_value: float, vdda_mv: float = 3300.0) -> float:
+    def adc_to_voltage(self, adc_value: float, vdda_mv: float) -> float:
         """Convert ADC value to voltage (V)
 
         Args:
             adc_value: Raw ADC value (0-65535)
-            vdda_mv: Reference voltage in millivolts (fixed at 3300 mV)
+            vdda_mv: Reference voltage in millivolts (from VREFINT calibration)
 
         Returns:
             float: Voltage in range 0-3.3V
         """
         return (adc_value / ADC_CONFIG["max_value"]) * (vdda_mv / 1000.0)
 
-    def adc_to_current(self, adc_value: float, vdda_mv: float = 3300.0) -> float:
+    def adc_to_current(self, adc_value: float, vdda_mv: float) -> float:
         """Convert ADC value to voltage (V)
 
         Note: This converts to voltage, not current, as sensor is not yet applied.
@@ -201,7 +203,7 @@ class ADCReceiver:
 
         Args:
             adc_value: Raw ADC value (0-65535)
-            vdda_mv: Reference voltage in millivolts (fixed at 3300 mV)
+            vdda_mv: Reference voltage in millivolts (from VREFINT calibration)
 
         Returns:
             float: Voltage in range 0-3.3V
@@ -216,7 +218,7 @@ class ADCReceiver:
         Args:
             voltage: List of 2048 voltage ADC samples (ADC1)
             current: List of 2048 current ADC samples (ADC2)
-            vdda_mv: Reference voltage in millivolts (fixed at 3300 mV)
+            vdda_mv: Reference voltage in millivolts (from VREFINT calibration)
 
         Returns:
             dict: Statistics including mean and RMS values
@@ -356,6 +358,9 @@ class ADCReceiver:
         while True:
             packet = self.read_packet()
             if packet:
+                # Update current VREF value
+                self.current_vref_mv = packet["vref_mv"]
+                
                 # Accumulate dual-channel samples
                 self.voltage_buffer.extend(packet["voltage"])
                 self.current_buffer.extend(packet["current"])
@@ -367,13 +372,16 @@ class ADCReceiver:
                     self.voltage_buffer = self.voltage_buffer[self.ANALYSIS_WINDOW :]
                     self.current_buffer = self.current_buffer[self.ANALYSIS_WINDOW :]
 
+                    # Use calibrated VDDA from most recent packet
+                    vref_mv = self.current_vref_mv
+
                     # DEBUG: Plot first analysis window
                     if plot_first_window and not plotted:
-                        self.plot_samples(voltage_window, current_window, 3300.0)
+                        self.plot_samples(voltage_window, current_window, vref_mv)
                         plotted = True
 
                     # Get statistics from this window
-                    stats = self.process_analysis_window(voltage_window, current_window, 3300.0)
+                    stats = self.process_analysis_window(voltage_window, current_window, vref_mv)
 
                     # Accumulate for 1-second average (using converted values)
                     v_mean_sum += stats["v_rms"]  # Use RMS for AC measurements
@@ -388,7 +396,7 @@ class ADCReceiver:
                         i_avg = i_mean_sum / sample_count
                         elapsed = current_time - self.start_time
                         print(
-                            f"[{elapsed:6.1f}s] CH1_rms={v_avg:5.3f}V, CH2_rms={i_avg:5.3f}V, Pkts={self.packet_count:4d}, Err={self.error_count:2d}"
+                            f"[{elapsed:6.1f}s] CH1_rms={v_avg:5.3f}V, CH2_rms={i_avg:5.3f}V, VREF={self.current_vref_mv:4d}mV, Pkts={self.packet_count:4d}, Err={self.error_count:2d}"
                         )
 
                         # Reset accumulators
@@ -397,6 +405,7 @@ class ADCReceiver:
                         sample_count = 0
 
                     last_print_time = current_time
+
 
     def print_summary(self):
         """Print summary statistics"""
