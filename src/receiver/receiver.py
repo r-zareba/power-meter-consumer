@@ -7,6 +7,7 @@ import serial
 from plotly.subplots import make_subplots
 
 from config import ADC_CONFIG
+from utils import PRINT_STATS, measure_time, print_performance_stats
 
 
 class ADCReceiver:
@@ -15,12 +16,9 @@ class ADCReceiver:
     # Protocol constants (must match STM32)
     START_MARKER = 0xFFFF
     END_MARKER = 0xFFFE
-    EXPECTED_SAMPLES = ADC_CONFIG[
-        "samples_per_packet"
-    ]  # Samples per channel per packet
-    ANALYSIS_WINDOW = (
-        2048  # IEC 61000-4-7 compliant: 200ms at 10.24kHz (2^11 samples - perfect FFT)
-    )
+    EXPECTED_SAMPLES = ADC_CONFIG["samples_per_packet"]
+    ANALYSIS_WINDOW = 2048  # IEC 61000-4-7 compliant: 200ms at 10.24kHz (2^11 samples)
+    ADC_TO_MV_SCALE = ADC_CONFIG["max_value"] * 1000.0  # Precomputed: 65535000.0
 
     def __init__(self, port: str, baudrate: int):
         self.port = port
@@ -31,11 +29,23 @@ class ADCReceiver:
         self.last_sequence = None
         self.start_time = None
 
-        # Sample accumulation for 2-buffer analysis window (dual-channel)
         self.voltage_buffer = []
         self.current_buffer = []
         self.analysis_count = 0
-        self.current_vref_mv = 3300  # Most recent VREF value from packets
+        self.current_vref_mv = ADC_CONFIG["vref"]  # updated from packets if available
+
+    @staticmethod
+    def calculate_crc16(data: bytes) -> int:
+        """Calculate CRC16-Modbus (must match STM32 algorithm)"""
+        crc = 0xFFFF
+        for byte in data:
+            crc ^= byte
+            for _ in range(8):
+                if crc & 0x0001:
+                    crc = (crc >> 1) ^ 0xA001
+                else:
+                    crc >>= 1
+        return crc
 
     def connect(self) -> bool:
         """Open serial port connection"""
@@ -51,14 +61,10 @@ class ADCReceiver:
                 rtscts=False,
                 dsrdtr=False,
             )
-            # Give port time to stabilize
-            time.sleep(0.1)
 
-            # Clear any stale data from buffers
+            time.sleep(0.1)
             self.serial.reset_input_buffer()
             self.serial.reset_output_buffer()
-
-            # Wait a bit more for simulator to start sending
             time.sleep(0.2)
 
             return True
@@ -67,63 +73,35 @@ class ADCReceiver:
             return False
 
     def disconnect(self):
-        """Close serial port"""
+        """Close serial port connection"""
         if self.serial and self.serial.is_open:
             self.serial.close()
 
-    def find_sync(self, max_bytes=None):
-        """Search for start marker in byte stream
-
-        Args:
-            max_bytes: Maximum bytes to check before giving up (None = unlimited)
-        """
+    def find_sync(self):
+        """Search for start marker in byte stream"""
         sync_bytes = struct.pack("<H", self.START_MARKER)
-        bytes_checked = 0
 
-        while max_bytes is None or bytes_checked < max_bytes:
+        while True:
             byte = self.serial.read(1)
             if not byte:
-                # Timeout - keep trying in continuous mode
-                if max_bytes is None:
-                    continue
-                return False
-            bytes_checked += 1
+                continue
 
             if byte == sync_bytes[0:1]:
                 next_byte = self.serial.read(1)
                 if next_byte == sync_bytes[1:2]:
-                    return True
-                if next_byte:
-                    bytes_checked += 1
+                    return  # Found sync marker
 
-        return False
-
-    def calculate_crc16(self, data):
-        """Calculate CRC16 (must match STM32 algorithm)"""
-        crc = 0xFFFF
-        for byte in data:
-            crc ^= byte
-            for _ in range(8):
-                if crc & 0x0001:
-                    crc = (crc >> 1) ^ 0xA001
-                else:
-                    crc >>= 1
-        return crc
-
-    def read_packet(self):
-        """Read and parse one complete packet"""
-        if not self.find_sync():
-            return None
-
+    @measure_time
+    def read_packet_bytes(self):
+        """Read raw packet bytes from serial (I/O operation)"""
         # Read header (after start marker)
         header = self.serial.read(6)  # seq(2) + count(2) + vref_mv(2)
         if len(header) != 6:
             self.error_count += 1
             return None
 
-        sequence, sample_count, vref_mv = struct.unpack("<HHH", header)
-
-        # Validate sample count
+        # Quick parse of sample count to know how much data to read
+        _, sample_count, _ = struct.unpack("<HHH", header)
         if sample_count != self.EXPECTED_SAMPLES:
             self.error_count += 1
             return None
@@ -139,15 +117,31 @@ class ADCReceiver:
             self.error_count += 1
             return None
 
-        # Combine for checksum calculation
-        data_bytes = voltage_bytes + current_bytes
-
         # Read checksum and end marker
         trailer = self.serial.read(4)
         if len(trailer) != 4:
             self.error_count += 1
             return None
 
+        return {
+            "header": header,
+            "voltage_bytes": voltage_bytes,
+            "current_bytes": current_bytes,
+            "trailer": trailer,
+        }
+
+    @measure_time
+    def parse_packet(self, raw_packet: dict):
+        """Parse and validate packet data (CPU processing)"""
+        header = raw_packet["header"]
+        voltage_bytes = raw_packet["voltage_bytes"]
+        current_bytes = raw_packet["current_bytes"]
+        trailer = raw_packet["trailer"]
+
+        # Unpack header
+        sequence, sample_count, vref_mv = struct.unpack("<HHH", header)
+
+        # Unpack trailer
         checksum, end_marker = struct.unpack("<HH", trailer)
 
         # Verify end marker
@@ -155,7 +149,8 @@ class ADCReceiver:
             self.error_count += 1
             return None
 
-        # Verify checksum (header: seq + count)
+        # Verify checksum (header + data)
+        data_bytes = voltage_bytes + current_bytes
         calculated_crc = self.calculate_crc16(header + data_bytes)
         if calculated_crc != checksum:
             self.error_count += 1
@@ -171,7 +166,7 @@ class ADCReceiver:
         self.last_sequence = sequence
         self.packet_count += 1
 
-        # Parse dual-channel ADC data
+        # Unpack samples
         voltage_samples = struct.unpack(f"<{sample_count}H", voltage_bytes)
         current_samples = struct.unpack(f"<{sample_count}H", current_bytes)
 
@@ -183,60 +178,40 @@ class ADCReceiver:
             "timestamp": time.time(),
         }
 
-    def adc_to_voltage(self, adc_value: float, vdda_mv: float) -> float:
-        """Convert ADC value to voltage (V)
+    def read_packet(self):
+        """Read and parse one complete packet"""
+        self.find_sync()
 
-        Args:
-            adc_value: Raw ADC value (0-65535)
-            vdda_mv: Reference voltage in millivolts (from VREFINT calibration)
+        raw_packet = self.read_packet_bytes()
+        if raw_packet is None:
+            return None
 
-        Returns:
-            float: Voltage in range 0-3.3V
-        """
-        return (adc_value / ADC_CONFIG["max_value"]) * (vdda_mv / 1000.0)
+        return self.parse_packet(raw_packet)
 
-    def adc_to_current(self, adc_value: float, vdda_mv: float) -> float:
-        """Convert ADC value to voltage (V)
-
-        Note: This converts to voltage, not current, as sensor is not yet applied.
-        Current channel ADC also outputs 0-VDDA range.
-
-        Args:
-            adc_value: Raw ADC value (0-65535)
-            vdda_mv: Reference voltage in millivolts (from VREFINT calibration)
-
-        Returns:
-            float: Voltage in range 0-3.3V
-        """
-        return (adc_value / ADC_CONFIG["max_value"]) * (vdda_mv / 1000.0)
-
-    def process_analysis_window(self, voltage: list, current: list, vdda_mv: float):
+    @measure_time
+    def process_analysis_window(self, voltage: list, current: list, vdda_mv: int):
         """
         Execute power analysis on 2048-sample window (200ms at 10.24kHz).
         IEC 61000-4-7 compliant analysis window with perfect 2^11 FFT alignment.
-
-        Args:
-            voltage: List of 2048 voltage ADC samples (ADC1)
-            current: List of 2048 current ADC samples (ADC2)
-            vdda_mv: Reference voltage in millivolts (from VREFINT calibration)
-
-        Returns:
-            dict: Statistics including mean and RMS values
         """
+        # uint16_t ADC samples
         voltage_array = np.array(voltage, dtype=np.float64)
         current_array = np.array(current, dtype=np.float64)
 
-        # Calculate statistics in ADC domain
+        # float samples
+        scale_factor = vdda_mv / self.ADC_TO_MV_SCALE
+        voltage_v = voltage_array * scale_factor
+        current_v = current_array * scale_factor
+
+        v_mean = np.mean(voltage_v)
+        v_rms = np.sqrt(np.mean(voltage_v**2))
+        i_mean = np.mean(current_v)
+        i_rms = np.sqrt(np.mean(current_v**2))
+
         v_mean_adc = np.mean(voltage_array)
         v_rms_adc = np.sqrt(np.mean(voltage_array**2))
         i_mean_adc = np.mean(current_array)
         i_rms_adc = np.sqrt(np.mean(current_array**2))
-
-        # Convert to physical units using calibrated VDDA
-        v_mean = self.adc_to_voltage(v_mean_adc, vdda_mv)
-        v_rms = self.adc_to_voltage(v_rms_adc, vdda_mv)
-        i_mean = self.adc_to_current(i_mean_adc, vdda_mv)
-        i_rms = self.adc_to_current(i_rms_adc, vdda_mv)
 
         return {
             "v_mean_adc": v_mean_adc,
@@ -249,20 +224,12 @@ class ADCReceiver:
             "i_rms": i_rms,
         }
 
-    def plot_samples(self, voltage: list, current: list, vdda_mv: float = 3300.0):
-        """
-        Debug function: Plot voltage and current samples (one-time scatter plot)
+    def plot_samples(self, voltage: list, current: list, vdda_mv: int):
+        # Convert ADC samples to voltage using vectorized NumPy operations
+        scale_factor = vdda_mv / self.ADC_TO_MV_SCALE
+        voltage_v = (np.array(voltage, dtype=np.float64) * scale_factor).tolist()
+        current_v = (np.array(current, dtype=np.float64) * scale_factor).tolist()
 
-        Args:
-            voltage: List of voltage ADC samples
-            current: List of current ADC samples
-            vdda_mv: Actual VDDA voltage in millivolts (from VREFINT calibration)
-        """
-        # Convert ADC samples to voltage values using calibrated VDDA
-        voltage_v = [self.adc_to_voltage(v, vdda_mv) for v in voltage]
-        current_v = [self.adc_to_current(c, vdda_mv) for c in current]
-
-        # Create subplots with Plotly
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -273,7 +240,6 @@ class ADCReceiver:
             vertical_spacing=0.12,
         )
 
-        # Voltage scatter plot
         fig.add_trace(
             go.Scattergl(
                 x=list(range(len(voltage_v))),
@@ -286,7 +252,6 @@ class ADCReceiver:
             col=1,
         )
 
-        # Current scatter plot
         fig.add_trace(
             go.Scattergl(
                 x=list(range(len(current_v))),
@@ -299,39 +264,22 @@ class ADCReceiver:
             col=1,
         )
 
-        # Update layout
         fig.update_xaxes(title_text="Sample", row=2, col=1)
         fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
         fig.update_yaxes(title_text="Voltage (V)", row=2, col=1)
-
         fig.update_layout(
             height=600, showlegend=False, title_text="Voltage Samples Analysis Window"
         )
-
         fig.show()
 
     def receive_continuous(self, plot_first_window: bool = False):
-        """Continuously receive packets and calculates stats every 1 second
-
-        Args:
-            plot_first_window: If True, plot the first complete analysis window
-        """
-
         self.start_time = time.time()
-        last_print_time = time.time()
-
-        # Accumulators for 1-second averaging
-        v_mean_sum = 0.0
-        i_mean_sum = 0.0
-        sample_count = 0
-
-        # Debug flag - plot first analysis window if requested
         plotted = False
 
         print(f"Receiving data from {self.port} at {self.baudrate} baud...")
         print("Waiting for sync...")
 
-        # Initial sync - be patient and wait for first valid packet
+        # Initial sync - wait for first valid packet
         sync_attempts = 0
         first_packet = None
         while first_packet is None and sync_attempts < 10:
@@ -360,7 +308,7 @@ class ADCReceiver:
             if packet:
                 # Update current VREF value
                 self.current_vref_mv = packet["vref_mv"]
-                
+
                 # Accumulate dual-channel samples
                 self.voltage_buffer.extend(packet["voltage"])
                 self.current_buffer.extend(packet["current"])
@@ -372,40 +320,23 @@ class ADCReceiver:
                     self.voltage_buffer = self.voltage_buffer[self.ANALYSIS_WINDOW :]
                     self.current_buffer = self.current_buffer[self.ANALYSIS_WINDOW :]
 
-                    # Use calibrated VDDA from most recent packet
-                    vref_mv = self.current_vref_mv
-
                     # DEBUG: Plot first analysis window
                     if plot_first_window and not plotted:
-                        self.plot_samples(voltage_window, current_window, vref_mv)
+                        self.plot_samples(
+                            voltage_window, current_window, self.current_vref_mv
+                        )
                         plotted = True
 
                     # Get statistics from this window
-                    stats = self.process_analysis_window(voltage_window, current_window, vref_mv)
+                    stats = self.process_analysis_window(
+                        voltage_window, current_window, self.current_vref_mv
+                    )
+                    self.analysis_count += 1
 
-                    # Accumulate for 1-second average (using converted values)
-                    v_mean_sum += stats["v_rms"]  # Use RMS for AC measurements
-                    i_mean_sum += stats["i_rms"]
-                    sample_count += 1
-
-                # Print average every 1 second
-                current_time = time.time()
-                if current_time - last_print_time >= 1.0:
-                    if sample_count > 0:
-                        v_avg = v_mean_sum / sample_count
-                        i_avg = i_mean_sum / sample_count
-                        elapsed = current_time - self.start_time
-                        print(
-                            f"[{elapsed:6.1f}s] CH1_rms={v_avg:5.3f}V, CH2_rms={i_avg:5.3f}V, VREF={self.current_vref_mv:4d}mV, Pkts={self.packet_count:4d}, Err={self.error_count:2d}"
-                        )
-
-                        # Reset accumulators
-                        v_mean_sum = 0.0
-                        i_mean_sum = 0.0
-                        sample_count = 0
-
-                    last_print_time = current_time
-
+                    elapsed = time.time() - self.start_time
+                    print(
+                        f"[{elapsed:6.1f}s] CH1_rms={stats['v_rms']:5.3f}V, CH2_rms={stats['i_rms']:5.3f}V, VREF={self.current_vref_mv:4d}mV, Pkts={self.packet_count:4d}, Err={self.error_count:2d}, Win={self.analysis_count:4d}"
+                    )
 
     def print_summary(self):
         """Print summary statistics"""
@@ -424,3 +355,7 @@ class ADCReceiver:
             print(f"  Analysis rate: {self.analysis_count / elapsed:.1f} windows/s")
             print("  Expected analysis rate: 5.0 windows/s (200ms per window)")
             print("=" * 60)
+
+        # Print performance statistics if enabled
+        if PRINT_STATS:
+            print_performance_stats()
