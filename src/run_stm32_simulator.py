@@ -9,15 +9,10 @@ packet protocol as the real STM32.
 Configuration is loaded from simulator/config.py
 
 Usage:
-    python src/scripts/run_stm32_simulator.py --port /dev/pts/3
+    python src/run_stm32_simulator.py --port /dev/pts/3
 """
 
 import argparse
-import sys
-from pathlib import Path
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from simulator.simulator import STM32Simulator
 

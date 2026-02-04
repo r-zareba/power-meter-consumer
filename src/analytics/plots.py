@@ -87,7 +87,7 @@ def plot_power_analysis(
     fig.update_yaxes(title_text="Current (A)", row=2, col=1)
     fig.update_yaxes(title_text="Power (W)", row=3, col=1)
 
-    fig.update_layout(title_text=title, height=1000, showlegend=True)
+    fig.update_layout(title_text=title, height=1000, showlegend=True, hovermode='x unified')
 
     fig.show()
 
@@ -189,6 +189,7 @@ def plot_three_phase_waveforms(
     fig.update_yaxes(title_text="Current (A)", row=2, col=1)
     fig.update_yaxes(title_text="Power (W)", row=3, col=1)
 
-    fig.update_layout(title_text=title, height=1000, showlegend=True)
+    # Enable synchronized zoom/pan across all subplots and unified hover
+    fig.update_layout(title_text=title, height=1000, showlegend=True, hovermode='x unified')
 
     fig.show()

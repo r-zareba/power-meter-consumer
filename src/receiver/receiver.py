@@ -233,6 +233,7 @@ class ADCReceiver:
         fig = make_subplots(
             rows=2,
             cols=1,
+            shared_xaxes=True,
             subplot_titles=(
                 f"Channel 1 (Voltage) - {len(voltage)} samples, 200ms",
                 f"Channel 2 (Current) - {len(current)} samples, 200ms",
@@ -268,7 +269,10 @@ class ADCReceiver:
         fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
         fig.update_yaxes(title_text="Voltage (V)", row=2, col=1)
         fig.update_layout(
-            height=600, showlegend=False, title_text="Voltage Samples Analysis Window"
+            height=600,
+            showlegend=False,
+            title_text="Voltage Samples Analysis Window",
+            hovermode='x unified'
         )
         fig.show()
 
