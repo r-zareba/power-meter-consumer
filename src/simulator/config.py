@@ -39,16 +39,16 @@ CURRENT = {
     "rms": 0.50,  # V RMS at ADC input
     "phase_shift": 0.0,  # Fundamental phase shift in degrees (negative = lag, positive = lead)
     # Harmonic amplitudes (fraction of fundamental, 0.0-1.0)
-    "harmonic_3": 0.3,
+    "harmonic_3": 0.0,
     "harmonic_5": 0.0,
-    "harmonic_7": 0.00,
+    "harmonic_7": 0.0,
     "harmonic_9": 0.0,
     "harmonic_11": 0.0,
     "harmonic_13": 0.0,
     "harmonic_15": 0.0,
     "harmonic_17": 0.0,
     # Harmonic phase shifts in degrees (relative to current fundamental)
-    "harmonic_3_phase": 00.0,
+    "harmonic_3_phase": 0.0,
     "harmonic_5_phase": 0.0,
     "harmonic_7_phase": 0.0,
     "harmonic_9_phase": 0.0,

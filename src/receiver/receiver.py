@@ -6,6 +6,11 @@ import plotly.graph_objects as go
 import serial
 from plotly.subplots import make_subplots
 
+from analytics.signal_analysis import (
+    calculate_cpc_components,
+    calculate_harmonics_with_phase,
+    calculate_thd,
+)
 from config import ADC_CONFIG
 from utils import PRINT_STATS, measure_time, print_performance_stats
 
@@ -19,6 +24,8 @@ class ADCReceiver:
     EXPECTED_SAMPLES = ADC_CONFIG["samples_per_packet"]
     ANALYSIS_WINDOW = 2048  # IEC 61000-4-7 compliant: 200ms at 10.24kHz (2^11 samples)
     ADC_TO_MV_SCALE = ADC_CONFIG["max_value"] * 1000.0  # Precomputed: 65535000.0
+    MAINS_FREQ = 50.0  # Hz
+    SAMPLING_FREQ = ADC_CONFIG["sampling_freq"]  # 10256 Hz
 
     def __init__(self, port: str, baudrate: int):
         self.port = port
@@ -191,37 +198,98 @@ class ADCReceiver:
     @measure_time
     def process_analysis_window(self, voltage: list, current: list, vdda_mv: int):
         """
-        Execute power analysis on 2048-sample window (200ms at 10.24kHz).
-        IEC 61000-4-7 compliant analysis window with perfect 2^11 FFT alignment.
+        Execute comprehensive single-phase power analysis on 2048-sample window.
+        IEC 61000-4-7 & IEC 61000-4-30 compliant analysis.
+        
+        Returns:
+            Dictionary with RMS values, powers, harmonics, THD, power factors, and CPC components
         """
-        # uint16_t ADC samples
+        # Convert ADC samples to voltage (float64 for precision)
         voltage_array = np.array(voltage, dtype=np.float64)
         current_array = np.array(current, dtype=np.float64)
-
-        # float samples
+        
         scale_factor = vdda_mv / self.ADC_TO_MV_SCALE
-        voltage_v = voltage_array * scale_factor
-        current_v = current_array * scale_factor
-
-        v_mean = np.mean(voltage_v)
-        v_rms = np.sqrt(np.mean(voltage_v**2))
-        i_mean = np.mean(current_v)
-        i_rms = np.sqrt(np.mean(current_v**2))
-
-        v_mean_adc = np.mean(voltage_array)
-        v_rms_adc = np.sqrt(np.mean(voltage_array**2))
-        i_mean_adc = np.mean(current_array)
-        i_rms_adc = np.sqrt(np.mean(current_array**2))
-
+        v_t = voltage_array * scale_factor
+        i_t = current_array * scale_factor
+        
+        # Remove DC offset (critical for AC power measurement)
+        # Sensors add DC bias (typically VCC/2 = 1.65V)
+        v_t = v_t - np.mean(v_t)
+        i_t = i_t - np.mean(i_t)
+        
+        # Basic RMS values (now AC-only)
+        v_rms = np.sqrt(np.mean(v_t**2))
+        i_rms = np.sqrt(np.mean(i_t**2))
+        
+        # Power calculations
+        p_t = v_t * i_t
+        p = np.mean(p_t)  # Active power
+        s = v_rms * i_rms  # Apparent power
+        q = np.sqrt(max(0, s**2 - p**2))  # Reactive power
+        pf = p / s if s > 0 else 0.0  # Power factor
+        
+        # Harmonic analysis with phase
+        # Window function recommended for non-synchronized sampling (real hardware)
+        v_harmonics = calculate_harmonics_with_phase(
+            v_t, self.SAMPLING_FREQ, self.MAINS_FREQ, use_window=True
+        )
+        i_harmonics = calculate_harmonics_with_phase(
+            i_t, self.SAMPLING_FREQ, self.MAINS_FREQ, use_window=True
+        )
+        
+        # Extract amplitudes for THD calculation
+        v_harmonics_amp = {h: amp for h, (amp, _) in v_harmonics.items()}
+        i_harmonics_amp = {h: amp for h, (amp, _) in i_harmonics.items()}
+        
+        v_thd = calculate_thd(v_harmonics_amp)
+        i_thd = calculate_thd(i_harmonics_amp)
+        
+        # Fundamental component phase information
+        v1_amp, v1_phase = v_harmonics[1]
+        i1_amp, i1_phase = i_harmonics[1]
+        phase_diff = v1_phase - i1_phase
+        # Normalize phase difference to [-π, π] for consistent display
+        phase_diff = np.angle(np.exp(1j * phase_diff))
+        dpf = np.cos(phase_diff)  # Displacement power factor
+        
+        # Czarnecki's CPC decomposition
+        cpc = calculate_cpc_components(v_t, i_t, self.SAMPLING_FREQ, self.MAINS_FREQ)
+        
         return {
-            "v_mean_adc": v_mean_adc,
-            "v_rms_adc": v_rms_adc,
-            "i_mean_adc": i_mean_adc,
-            "i_rms_adc": i_rms_adc,
-            "v_mean": v_mean,
+            # RMS values
             "v_rms": v_rms,
-            "i_mean": i_mean,
             "i_rms": i_rms,
+            # Power components
+            "P": p,
+            "Q": q,
+            "S": s,
+            "PF": pf,
+            # Harmonic distortion
+            "v_thd": v_thd,
+            "i_thd": i_thd,
+            # Fundamental phase
+            "v1_amp": v1_amp,
+            "i1_amp": i1_amp,
+            "phase_diff_deg": np.degrees(phase_diff),
+            "DPF": dpf,
+            "DF": cpc["DF"],
+            # CPC current components (RMS)
+            "I_a": cpc["I_a"],
+            "I_r": cpc["I_r"],
+            "I_s": cpc["I_s"],
+            "I_g": cpc["I_g"],
+            # CPC current ratios
+            "lambda_a": cpc["lambda_a"],
+            "lambda_r": cpc["lambda_r"],
+            "lambda_s": cpc["lambda_s"],
+            "lambda_g": cpc["lambda_g"],
+            # CPC power components
+            "Q1": cpc["Q1"],
+            "D_s": cpc["D_s"],
+            "D_g": cpc["D_g"],
+            # Harmonics (full data for logging/export)
+            "v_harmonics": v_harmonics,
+            "i_harmonics": i_harmonics,
         }
 
     def plot_samples(self, voltage: list, current: list, vdda_mv: int):
@@ -331,7 +399,7 @@ class ADCReceiver:
                         )
                         plotted = True
 
-                    # Get statistics from this window
+                    # Perform comprehensive power analysis on this window
                     stats = self.process_analysis_window(
                         voltage_window, current_window, self.current_vref_mv
                     )
@@ -339,7 +407,11 @@ class ADCReceiver:
 
                     elapsed = time.time() - self.start_time
                     print(
-                        f"[{elapsed:6.1f}s] CH1_rms={stats['v_rms']:5.3f}V, CH2_rms={stats['i_rms']:5.3f}V, VREF={self.current_vref_mv:4d}mV, Pkts={self.packet_count:4d}, Err={self.error_count:2d}, Win={self.analysis_count:4d}"
+                        f"[{elapsed:6.1f}s] P={stats['P']:6.2f}W, S={stats['S']:6.2f}VA, PF={stats['PF']:.3f}, "
+                        f"V_rms={stats['v_rms']:5.3f}V, I_rms={stats['i_rms']:5.3f}A, "
+                        f"THD_v={stats['v_thd']*100:4.1f}%, THD_i={stats['i_thd']*100:4.1f}%, "
+                        f"φ={stats['phase_diff_deg']:5.1f}°, DPF={stats['DPF']:.3f}, "
+                        f"Win={self.analysis_count:4d}"
                     )
 
     def print_summary(self):

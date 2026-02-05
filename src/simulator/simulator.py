@@ -115,6 +115,7 @@ class STM32Simulator:
         phase: float = 0.0,
         harmonics: dict = None,
         harmonic_phases: dict = None,
+        update_time_offset: bool = False,
     ) -> np.ndarray:
         """
         Generate sine wave samples for one packet
@@ -127,6 +128,7 @@ class STM32Simulator:
                       e.g., {3: 0.2, 5: 0.1} adds 20% 3rd and 10% 5th harmonic
             harmonic_phases: Dict of {harmonic_num: phase_in_degrees}
                            e.g., {3: 45.0, 5: -30.0} for harmonic phase shifts
+            update_time_offset: If True, increment time offset (call only once per packet)
 
         Returns:
             Array of ADC values (16-bit unsigned)
@@ -158,8 +160,9 @@ class STM32Simulator:
             [self.ac_to_adc(v, dc_bias) for v in signal], dtype=np.uint16
         )
 
-        # Update time offset for continuous signal
-        self.time_offset += self.SAMPLES_PER_PACKET / self.SAMPLING_FREQ
+        # Update time offset for continuous signal (only after both channels generated)
+        if update_time_offset:
+            self.time_offset += self.SAMPLES_PER_PACKET / self.SAMPLING_FREQ
 
         return adc_values
 
@@ -341,6 +344,7 @@ class STM32Simulator:
                     harmonic_phases=voltage_harmonic_phases
                     if voltage_harmonic_phases
                     else None,
+                    update_time_offset=False,  # Don't update yet
                 )
 
                 current_adc = self.generate_sine_wave(
@@ -351,6 +355,7 @@ class STM32Simulator:
                     harmonic_phases=current_harmonic_phases
                     if current_harmonic_phases
                     else None,
+                    update_time_offset=True,  # Update after both channels generated
                 )
 
                 # Transmit packet (throttled transmission, takes ~44ms)

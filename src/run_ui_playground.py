@@ -6,22 +6,30 @@ IEC 61000-4-7 & IEC 61000-4-30 compliant.
 import numpy as np
 import streamlit as st
 
-# Import all calculation functions from analytics module
-from analytics.analytics import (
-    MAINS_FREQ,
-    NUM_SAMPLES,
-    SAMPLING_FREQ,
-    analyze_harmonics,
-    analyze_harmonics_with_phase,
+# Import configuration
+from config import ADC_CONFIG
+
+# Import power analysis functions
+from analytics.signal_analysis import (
+    calculate_harmonics_with_phase,
     calculate_cpc_components,
     calculate_sequence_components,
     calculate_thd,
     calculate_three_phase_cpc,
     calculate_three_phase_power,
+)
+
+# Import signal generation functions
+from analytics.signal_generation import (
     generate_sine,
     generate_thyristor_current,
     generate_triac_current,
 )
+
+# Use hardware configuration for consistency with real system
+SAMPLING_FREQ = ADC_CONFIG["sampling_freq"]  # 10256 Hz
+NUM_SAMPLES = ADC_CONFIG["samples_per_packet"] * 2  # 2048 samples ~= 200ms at 10256 Hz
+MAINS_FREQ = 50  # Hz
 
 
 def render_single_phase_tab():
@@ -127,9 +135,13 @@ def render_single_phase_tab():
     q = np.sqrt(max(0, s**2 - p**2))
     pf = p / s if s > 0 else 0.0
 
-    # Harmonics
-    v_harmonics = analyze_harmonics(v_t, SAMPLING_FREQ, MAINS_FREQ)
-    i_harmonics = analyze_harmonics(i_t, SAMPLING_FREQ, MAINS_FREQ)
+    # Harmonics with phase
+    v_harmonics_phase = calculate_harmonics_with_phase(v_t, SAMPLING_FREQ, MAINS_FREQ)
+    i_harmonics_phase = calculate_harmonics_with_phase(i_t, SAMPLING_FREQ, MAINS_FREQ)
+    
+    # Extract amplitudes for THD calculation
+    v_harmonics = {h: amp for h, (amp, _) in v_harmonics_phase.items()}
+    i_harmonics = {h: amp for h, (amp, _) in i_harmonics_phase.items()}
     v_thd = calculate_thd(v_harmonics)
     i_thd = calculate_thd(i_harmonics)
 
@@ -214,9 +226,7 @@ def render_single_phase_tab():
     # Advanced metrics section (always visible)
     st.subheader("Advanced Metrics")
 
-    v_harmonics_phase = analyze_harmonics_with_phase(v_t, SAMPLING_FREQ, MAINS_FREQ)
-    i_harmonics_phase = analyze_harmonics_with_phase(i_t, SAMPLING_FREQ, MAINS_FREQ)
-
+    # Extract fundamental phase information
     v1_amp, v1_phase = v_harmonics_phase[1]
     i1_amp, i1_phase = i_harmonics_phase[1]
     phase_diff = v1_phase - i1_phase
@@ -685,9 +695,9 @@ def render_three_phase_tab():
     st.subheader("📊 Advanced Three-Phase Metrics")
 
     # Sequence components
-    v1_harmonics_phase = analyze_harmonics_with_phase(v1_t, SAMPLING_FREQ, MAINS_FREQ)
-    v2_harmonics_phase = analyze_harmonics_with_phase(v2_t, SAMPLING_FREQ, MAINS_FREQ)
-    v3_harmonics_phase = analyze_harmonics_with_phase(v3_t, SAMPLING_FREQ, MAINS_FREQ)
+    v1_harmonics_phase = calculate_harmonics_with_phase(v1_t, SAMPLING_FREQ, MAINS_FREQ)
+    v2_harmonics_phase = calculate_harmonics_with_phase(v2_t, SAMPLING_FREQ, MAINS_FREQ)
+    v3_harmonics_phase = calculate_harmonics_with_phase(v3_t, SAMPLING_FREQ, MAINS_FREQ)
 
     v1_1_amp, v1_1_phase = v1_harmonics_phase[1]
     v2_1_amp, v2_1_phase = v2_harmonics_phase[1]
@@ -792,11 +802,11 @@ def render_three_phase_tab():
             st.write(f"- I_g: {cpc_3['I_g']:.3f} A")
 
     # Harmonic analysis per phase
-    st.subheader("Per-Phase Harmonic Analysis (First 10)")
+    st.subheader("Per-Phase Harmonic Analysis with Phase (First 10)")
 
-    i1_harmonics = analyze_harmonics(i1_t, SAMPLING_FREQ, MAINS_FREQ)
-    i2_harmonics = analyze_harmonics(i2_t, SAMPLING_FREQ, MAINS_FREQ)
-    i3_harmonics = analyze_harmonics(i3_t, SAMPLING_FREQ, MAINS_FREQ)
+    i1_harmonics_phase = calculate_harmonics_with_phase(i1_t, SAMPLING_FREQ, MAINS_FREQ)
+    i2_harmonics_phase = calculate_harmonics_with_phase(i2_t, SAMPLING_FREQ, MAINS_FREQ)
+    i3_harmonics_phase = calculate_harmonics_with_phase(i3_t, SAMPLING_FREQ, MAINS_FREQ)
 
     harmonic_data = []
     for h in range(1, 11):
@@ -804,11 +814,13 @@ def render_three_phase_tab():
             {
                 "H": h,
                 "V1 (V)": f"{v1_harmonics_phase[h][0]:.2f}",
+                "V1 φ(°)": f"{np.degrees(v1_harmonics_phase[h][1]):.1f}",
+                "I1 (A)": f"{i1_harmonics_phase[h][0]:.3f}",
+                "I1 φ(°)": f"{np.degrees(i1_harmonics_phase[h][1]):.1f}",
                 "V2 (V)": f"{v2_harmonics_phase[h][0]:.2f}",
+                "I2 (A)": f"{i2_harmonics_phase[h][0]:.3f}",
                 "V3 (V)": f"{v3_harmonics_phase[h][0]:.2f}",
-                "I1 (A)": f"{i1_harmonics[h]:.3f}",
-                "I2 (A)": f"{i2_harmonics[h]:.3f}",
-                "I3 (A)": f"{i3_harmonics[h]:.3f}",
+                "I3 (A)": f"{i3_harmonics_phase[h][0]:.3f}",
             }
         )
 
