@@ -1,17 +1,18 @@
 import struct
 import time
+from datetime import datetime
+from typing import List, Optional
 
-import numpy as np
-import plotly.graph_objects as go
 import serial
-from plotly.subplots import make_subplots
 
-from analytics.signal_analysis import (
-    calculate_cpc_components,
-    calculate_harmonics_with_phase,
-    calculate_thd,
-)
+from analytics.aggregation import create_aggregate_message
+from analytics.plots import plot_raw_adc_samples
+from analytics.power_analyzer import PowerAnalyzer
 from config import ADC_CONFIG
+from messaging.mqtt_publisher import MQTTPublisher
+from models.mqtt_message import AggregateMessage
+from models.power_measurement import PowerMeasurement
+from storage.sqlite_manager import SQLiteManager
 from utils import PRINT_STATS, measure_time, print_performance_stats
 
 
@@ -26,8 +27,28 @@ class ADCReceiver:
     ADC_TO_MV_SCALE = ADC_CONFIG["max_value"] * 1000.0  # Precomputed: 65535000.0
     MAINS_FREQ = 50.0  # Hz
     SAMPLING_FREQ = ADC_CONFIG["sampling_freq"]  # 10256 Hz
+    N_SERIAL_SYNC_RETRIES = 10
 
-    def __init__(self, port: str, baudrate: int):
+    def __init__(
+        self,
+        port: str,
+        baudrate: int,
+        power_analyzer: PowerAnalyzer,
+        db_manager: Optional[SQLiteManager] = None,
+        mqtt_publisher: Optional[MQTTPublisher] = None,
+        print_measurements: bool = False,
+    ):
+        """
+        Initialize ADC Receiver.
+
+        Args:
+            port: Serial port path
+            baudrate: Serial baudrate
+            power_analyzer: Power analysis engine
+            db_manager: SQLite database manager for storing measurements
+            mqtt_publisher: MQTT publisher for 1-second aggregates
+            print_measurements: If True, print every 200ms measurement; if False, print 1-second aggregates
+        """
         self.port = port
         self.baudrate = baudrate
         self.serial = None
@@ -40,6 +61,15 @@ class ADCReceiver:
         self.current_buffer = []
         self.analysis_count = 0
         self.current_vref_mv = ADC_CONFIG["vref"]  # updated from packets if available
+
+        # Analysis and storage dependencies
+        self.power_analyzer = power_analyzer
+        self.db_manager = db_manager
+        self.mqtt_publisher = mqtt_publisher
+        self.print_measurements = print_measurements
+
+        # Buffer for 1-second aggregation (5 × 200ms measurements)
+        self.measurement_buffer: List[PowerMeasurement] = []
 
     @staticmethod
     def calculate_crc16(data: bytes) -> int:
@@ -196,153 +226,60 @@ class ADCReceiver:
         return self.parse_packet(raw_packet)
 
     @measure_time
-    def process_analysis_window(self, voltage: list, current: list, vdda_mv: int):
+    def analyze_power_window(
+        self, voltage: list, current: list, vdda_mv: int, timestamp: datetime
+    ) -> PowerMeasurement:
+        """Helper method to track power analysis timing."""
+        return self.power_analyzer.analyze_window(voltage, current, vdda_mv, timestamp)
+
+    @measure_time
+    def store_measurement(self, measurement: PowerMeasurement) -> None:
+        """Helper method to track database insert timing."""
+        if self.db_manager:
+            self.db_manager.insert(measurement)
+
+    @measure_time
+    def create_aggregate(
+        self, measurements: List[PowerMeasurement]
+    ) -> AggregateMessage:
+        """Helper method to track aggregation timing."""
+        if self.mqtt_publisher:
+            device_id = self.mqtt_publisher.device_id
+        else:
+            device_id = "test"
+        return create_aggregate_message(measurements, device_id, self.MAINS_FREQ)
+
+    @measure_time
+    def publish_aggregate(self, aggregate: AggregateMessage) -> None:
+        """Helper method to track MQTT publish timing."""
+        if self.mqtt_publisher:
+            self.mqtt_publisher.publish(aggregate)
+
+    def handle_measurement(self, measurement: PowerMeasurement) -> None:
         """
-        Execute comprehensive single-phase power analysis on 2048-sample window.
-        IEC 61000-4-7 & IEC 61000-4-30 compliant analysis.
-        
-        Returns:
-            Dictionary with RMS values, powers, harmonics, THD, power factors, and CPC components
+        Handle a new 200ms measurement: store in DB and buffer for aggregation.
+
+        Args:
+            measurement: PowerMeasurement to process
         """
-        # Convert ADC samples to voltage (float64 for precision)
-        voltage_array = np.array(voltage, dtype=np.float64)
-        current_array = np.array(current, dtype=np.float64)
-        
-        scale_factor = vdda_mv / self.ADC_TO_MV_SCALE
-        v_t = voltage_array * scale_factor
-        i_t = current_array * scale_factor
-        
-        # Remove DC offset (critical for AC power measurement)
-        # Sensors add DC bias (typically VCC/2 = 1.65V)
-        v_t = v_t - np.mean(v_t)
-        i_t = i_t - np.mean(i_t)
-        
-        # Basic RMS values (now AC-only)
-        v_rms = np.sqrt(np.mean(v_t**2))
-        i_rms = np.sqrt(np.mean(i_t**2))
-        
-        # Power calculations
-        p_t = v_t * i_t
-        p = np.mean(p_t)  # Active power
-        s = v_rms * i_rms  # Apparent power
-        q = np.sqrt(max(0, s**2 - p**2))  # Reactive power
-        pf = p / s if s > 0 else 0.0  # Power factor
-        
-        # Harmonic analysis with phase
-        # Window function recommended for non-synchronized sampling (real hardware)
-        v_harmonics = calculate_harmonics_with_phase(
-            v_t, self.SAMPLING_FREQ, self.MAINS_FREQ, use_window=True
-        )
-        i_harmonics = calculate_harmonics_with_phase(
-            i_t, self.SAMPLING_FREQ, self.MAINS_FREQ, use_window=True
-        )
-        
-        # Extract amplitudes for THD calculation
-        v_harmonics_amp = {h: amp for h, (amp, _) in v_harmonics.items()}
-        i_harmonics_amp = {h: amp for h, (amp, _) in i_harmonics.items()}
-        
-        v_thd = calculate_thd(v_harmonics_amp)
-        i_thd = calculate_thd(i_harmonics_amp)
-        
-        # Fundamental component phase information
-        v1_amp, v1_phase = v_harmonics[1]
-        i1_amp, i1_phase = i_harmonics[1]
-        phase_diff = v1_phase - i1_phase
-        # Normalize phase difference to [-π, π] for consistent display
-        phase_diff = np.angle(np.exp(1j * phase_diff))
-        dpf = np.cos(phase_diff)  # Displacement power factor
-        
-        # Czarnecki's CPC decomposition
-        cpc = calculate_cpc_components(v_t, i_t, self.SAMPLING_FREQ, self.MAINS_FREQ)
-        
-        return {
-            # RMS values
-            "v_rms": v_rms,
-            "i_rms": i_rms,
-            # Power components
-            "P": p,
-            "Q": q,
-            "S": s,
-            "PF": pf,
-            # Harmonic distortion
-            "v_thd": v_thd,
-            "i_thd": i_thd,
-            # Fundamental phase
-            "v1_amp": v1_amp,
-            "i1_amp": i1_amp,
-            "phase_diff_deg": np.degrees(phase_diff),
-            "DPF": dpf,
-            "DF": cpc["DF"],
-            # CPC current components (RMS)
-            "I_a": cpc["I_a"],
-            "I_r": cpc["I_r"],
-            "I_s": cpc["I_s"],
-            "I_g": cpc["I_g"],
-            # CPC current ratios
-            "lambda_a": cpc["lambda_a"],
-            "lambda_r": cpc["lambda_r"],
-            "lambda_s": cpc["lambda_s"],
-            "lambda_g": cpc["lambda_g"],
-            # CPC power components
-            "Q1": cpc["Q1"],
-            "D_s": cpc["D_s"],
-            "D_g": cpc["D_g"],
-            # Harmonics (full data for logging/export)
-            "v_harmonics": v_harmonics,
-            "i_harmonics": i_harmonics,
-        }
+        # 1. Insert into SQLite database
+        self.store_measurement(measurement)
 
-    def plot_samples(self, voltage: list, current: list, vdda_mv: int):
-        # Convert ADC samples to voltage using vectorized NumPy operations
-        scale_factor = vdda_mv / self.ADC_TO_MV_SCALE
-        voltage_v = (np.array(voltage, dtype=np.float64) * scale_factor).tolist()
-        current_v = (np.array(current, dtype=np.float64) * scale_factor).tolist()
+        # 2. Add to buffer for 1-second aggregation
+        self.measurement_buffer.append(measurement)
 
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            shared_xaxes=True,
-            subplot_titles=(
-                f"Channel 1 (Voltage) - {len(voltage)} samples, 200ms",
-                f"Channel 2 (Current) - {len(current)} samples, 200ms",
-            ),
-            vertical_spacing=0.12,
-        )
+        # 3. If buffer is full (5 measurements = 1 second), publish aggregate
+        if len(self.measurement_buffer) >= 5:
+            aggregate = self.create_aggregate(self.measurement_buffer)
 
-        fig.add_trace(
-            go.Scattergl(
-                x=list(range(len(voltage_v))),
-                y=voltage_v,
-                mode="markers",
-                marker=dict(size=2, opacity=0.6),
-                name="CH1",
-            ),
-            row=1,
-            col=1,
-        )
+            self.publish_aggregate(aggregate)
+            
+            # Print aggregate data (every 1 second)
+            if not self.print_measurements:
+                self._print_aggregate(aggregate)
 
-        fig.add_trace(
-            go.Scattergl(
-                x=list(range(len(current_v))),
-                y=current_v,
-                mode="markers",
-                marker=dict(size=2, opacity=0.6),
-                name="CH2",
-            ),
-            row=2,
-            col=1,
-        )
-
-        fig.update_xaxes(title_text="Sample", row=2, col=1)
-        fig.update_yaxes(title_text="Voltage (V)", row=1, col=1)
-        fig.update_yaxes(title_text="Voltage (V)", row=2, col=1)
-        fig.update_layout(
-            height=600,
-            showlegend=False,
-            title_text="Voltage Samples Analysis Window",
-            hovermode='x unified'
-        )
-        fig.show()
+            # Clear buffer for next second
+            self.measurement_buffer.clear()
 
     def receive_continuous(self, plot_first_window: bool = False):
         self.start_time = time.time()
@@ -354,18 +291,19 @@ class ADCReceiver:
         # Initial sync - wait for first valid packet
         sync_attempts = 0
         first_packet = None
-        while first_packet is None and sync_attempts < 10:
+        while first_packet is None and sync_attempts < self.N_SERIAL_SYNC_RETRIES:
             first_packet = self.read_packet()
             if first_packet is None:
                 sync_attempts += 1
                 if sync_attempts % 3 == 0:
                     print(f"  Still waiting for sync... (attempt {sync_attempts})")
-                    # Flush buffers and try again
                     self.serial.reset_input_buffer()
                 time.sleep(0.1)
 
         if first_packet is None:
-            print("ERROR: Could not establish sync after 10 attempts")
+            print(
+                f"ERROR: Could not establish sync after {self.N_SERIAL_SYNC_RETRIES} attempts"
+            )
             print("Make sure device is running and sending data.")
             return
 
@@ -377,43 +315,130 @@ class ADCReceiver:
 
         while True:
             packet = self.read_packet()
-            if packet:
-                # Update current VREF value
-                self.current_vref_mv = packet["vref_mv"]
+            if not packet:
+                continue
 
-                # Accumulate dual-channel samples
-                self.voltage_buffer.extend(packet["voltage"])
-                self.current_buffer.extend(packet["current"])
+            # Update current VREF value
+            self.current_vref_mv = packet["vref_mv"]
 
-                # Process complete analysis windows
-                if len(self.voltage_buffer) >= self.ANALYSIS_WINDOW:
-                    voltage_window = self.voltage_buffer[: self.ANALYSIS_WINDOW]
-                    current_window = self.current_buffer[: self.ANALYSIS_WINDOW]
-                    self.voltage_buffer = self.voltage_buffer[self.ANALYSIS_WINDOW :]
-                    self.current_buffer = self.current_buffer[self.ANALYSIS_WINDOW :]
+            # Accumulate dual-channel samples
+            self.voltage_buffer.extend(packet["voltage"])
+            self.current_buffer.extend(packet["current"])
 
-                    # DEBUG: Plot first analysis window
-                    if plot_first_window and not plotted:
-                        self.plot_samples(
-                            voltage_window, current_window, self.current_vref_mv
-                        )
-                        plotted = True
+            # Process complete analysis windows
+            if len(self.voltage_buffer) >= self.ANALYSIS_WINDOW:
+                voltage_window = self.voltage_buffer[: self.ANALYSIS_WINDOW]
+                current_window = self.current_buffer[: self.ANALYSIS_WINDOW]
+                self.voltage_buffer = self.voltage_buffer[self.ANALYSIS_WINDOW :]
+                self.current_buffer = self.current_buffer[self.ANALYSIS_WINDOW :]
 
-                    # Perform comprehensive power analysis on this window
-                    stats = self.process_analysis_window(
-                        voltage_window, current_window, self.current_vref_mv
+                # DEBUG: Plot first analysis window
+                if plot_first_window and not plotted:
+                    plot_raw_adc_samples(
+                        voltage_window,
+                        current_window,
+                        self.current_vref_mv,
+                        ADC_CONFIG["max_value"],
+                        "Raw ADC Samples (200ms Analysis Window)",
                     )
-                    self.analysis_count += 1
+                    plotted = True
 
-                    elapsed = time.time() - self.start_time
-                    print(
-                        f"[{elapsed:6.1f}s] P={stats['P']:6.2f}W, S={stats['S']:6.2f}VA, PF={stats['PF']:.3f}, "
-                        f"V_rms={stats['v_rms']:5.3f}V, I_rms={stats['i_rms']:5.3f}A, "
-                        f"THD_v={stats['v_thd']*100:4.1f}%, THD_i={stats['i_thd']*100:4.1f}%, "
-                        f"φ={stats['phase_diff_deg']:5.1f}°, DPF={stats['DPF']:.3f}, "
-                        f"Win={self.analysis_count:4d}"
-                    )
+                # Perform comprehensive power analysis on this window
+                measurement = self.analyze_power_window(
+                    voltage_window,
+                    current_window,
+                    self.current_vref_mv,
+                    datetime.now(),
+                )
+                self.analysis_count += 1
 
+                # Handle measurement (store in DB + aggregate for MQTT)
+                self.handle_measurement(measurement)
+
+                # Print individual measurement if flag is set
+                if self.print_measurements:
+                    self._print_measurement(measurement)
+
+    def _print_measurement(self, measurement: PowerMeasurement) -> None:
+        """Print all metrics from 200ms measurement."""
+        elapsed = time.time() - self.start_time
+        print(f"\n{'='*80}")
+        print(f"[{elapsed:6.1f}s] PowerMeasurement #{self.analysis_count} @ {measurement.timestamp}")
+        print(f"{'='*80}")
+        print("RMS Values:")
+        print(f"  V_rms = {measurement.v_rms:7.3f} V")
+        print(f"  I_rms = {measurement.i_rms:7.4f} A")
+        print("Power:")
+        print(f"  P  = {measurement.P:7.2f} W")
+        print(f"  Q  = {measurement.Q:7.2f} VAR")
+        print(f"  S  = {measurement.S:7.2f} VA")
+        print(f"  PF = {measurement.PF:6.4f}")
+        print("Harmonics:")
+        print(f"  V_THD  = {measurement.v_thd*100:5.2f} %")
+        print(f"  I_THD  = {measurement.i_thd*100:5.2f} %")
+        print(f"  V1_amp = {measurement.v1_amp:7.3f} V")
+        print(f"  I1_amp = {measurement.i1_amp:7.4f} A")
+        print("Phase:")
+        print(f"  φ   = {measurement.phase_diff_deg:6.2f} °")
+        print(f"  DPF = {measurement.DPF:6.4f}")
+        print("Power Quality:")
+        print(f"  Frequency     = {measurement.frequency:6.3f} Hz")
+        print(f"  Crest_V       = {measurement.crest_factor_v:5.3f}")
+        print(f"  Crest_I       = {measurement.crest_factor_i:5.3f}")
+        print(f"  V_deviation   = {measurement.voltage_deviation_pct:+6.3f} %")
+        print(f"  K-factor      = {measurement.k_factor:6.3f}")
+        print("CPC (Currents' Physical Components):")
+        print(f"  DF = {measurement.cpc_distortion_factor:6.4f}")
+        print(f"  I_active    = {measurement.cpc_active_current:7.4f} A  (λ_a = {measurement.cpc_active_ratio:6.4f})")
+        print(f"  I_reactive  = {measurement.cpc_reactive_current:7.4f} A  (λ_r = {measurement.cpc_reactive_ratio:6.4f}, Q1 = {measurement.cpc_reactive_power:7.2f} VAR)")
+        print(f"  I_scattered = {measurement.cpc_scattered_current:7.4f} A  (λ_s = {measurement.cpc_scattered_ratio:6.4f}, D_s = {measurement.cpc_scattered_power:7.2f} VA)")
+        print(f"  I_generated = {measurement.cpc_generated_current:7.4f} A  (λ_g = {measurement.cpc_generated_ratio:6.4f}, D_g = {measurement.cpc_generated_power:7.2f} VA)")
+        
+        # Harmonic responsibility analysis
+        print("Harmonic Power Flow (IEEE 519 Responsibility):")
+        grid_sourced = []
+        load_sourced = []
+        for h in sorted(measurement.harmonic_power_flow.keys()):
+            if h == 1:
+                continue  # Skip fundamental
+            p_h = measurement.harmonic_power_flow[h]
+            if abs(p_h) > 0.01:  # Only show significant harmonics (>10mW)
+                if p_h > 0:
+                    grid_sourced.append((h, p_h))
+                else:
+                    load_sourced.append((h, p_h))
+        
+        if grid_sourced:
+            print("  Grid sourced (Grid→Load):")
+            for h, p_h in grid_sourced[:10]:  # Top 10
+                print(f"    H{h:2d}: +{p_h:6.3f}W")
+        
+        if load_sourced:
+            print("  Load sourced (Load→Grid):")
+            for h, p_h in load_sourced[:10]:  # Top 10
+                print(f"    H{h:2d}: {p_h:7.3f}W")
+        
+        if not grid_sourced and not load_sourced:
+            print("  No significant harmonic power flow detected")
+        
+        print("Metadata:")
+        print(f"  VREF={measurement.vref_mv}mV")
+        print(f"{'='*80}\n")
+    
+    def _print_aggregate(self, aggregate: AggregateMessage) -> None:
+        """Print 1-second aggregate data."""
+        elapsed = time.time() - self.start_time
+        
+        print(
+            f"[{elapsed:6.1f}s] 1s AGG: "
+            f"P={aggregate.P.avg:6.2f}W({aggregate.P.min:.1f}-{aggregate.P.max:.1f}), "
+            f"V={aggregate.v_rms.avg:5.1f}V({aggregate.v_rms.min:.1f}-{aggregate.v_rms.max:.1f}), "
+            f"I={aggregate.i_rms.avg:5.2f}A({aggregate.i_rms.min:.2f}-{aggregate.i_rms.max:.2f}), "
+            f"PF={aggregate.PF.avg:.3f}, Freq={aggregate.frequency_avg:.2f}Hz, "
+            f"Energy: {aggregate.energy_wh:.4f}Wh, "
+            f"Harmonics: Grid={aggregate.harmonics_grid_sourced_w:.2f}W, Load={aggregate.harmonics_load_sourced_w:.2f}W"
+        )
+    
     def print_summary(self):
         """Print summary statistics"""
         if self.start_time is None:

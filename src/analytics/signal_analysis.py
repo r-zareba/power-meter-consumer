@@ -1,15 +1,3 @@
-"""
-Power analysis calculation functions for single-phase and three-phase systems.
-IEC 61000-4-7 & IEC 61000-4-30 compliant.
-
-Includes:
-- Harmonic analysis (FFT-based)
-- Total Harmonic Distortion (THD)
-- Czarnecki's Currents' Physical Components (CPC) theory
-- Three-phase power calculations
-- Symmetrical components (sequence analysis)
-"""
-
 import numpy as np
 
 
@@ -44,7 +32,7 @@ def calculate_harmonics_with_phase(
     else:
         windowed_signal = signal
         window_correction = 1.0
-    
+
     # Perform FFT once
     fft_result = np.fft.rfft(windowed_signal)
     fft_magnitude = np.abs(fft_result) * 2 / len(signal) * window_correction

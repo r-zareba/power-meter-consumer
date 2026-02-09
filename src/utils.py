@@ -1,5 +1,3 @@
-"""Utility functions for performance monitoring and instrumentation"""
-
 import os
 import time
 from functools import wraps
@@ -32,7 +30,7 @@ if PRINT_STATS:
 
         return wrapper
 else:
-    # Production mode - absolute zero overhead
+    # Production mode
     def measure_time(func):
         return func  # Direct passthrough, no wrapper
 
@@ -46,7 +44,10 @@ def print_performance_stats():
     ordered_operations = [
         "read_packet_bytes",
         "parse_packet",
-        "process_analysis_window",
+        "analyze_power_window",
+        "store_measurement",
+        "create_aggregate",
+        "publish_aggregate",
     ]
 
     print("\n" + "=" * 80)
@@ -68,7 +69,7 @@ def print_performance_stats():
             mean_val = np.mean(arr)
             total_mean += mean_val
             total_count = len(arr)  # Assuming all operations have same count
-            
+
             print(
                 f"{operation:<30} "
                 f"{mean_val:8.2f} "
@@ -102,5 +103,5 @@ def print_performance_stats():
             f"{'':>8} "
             f"{total_count:8d}"
         )
-    
+
     print("=" * 80)

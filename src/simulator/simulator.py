@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""
-STM32 Power Meter Simulator
-
-Simulates STM32 UART data transmission with dual-channel ADC data.
-Generates synthetic voltage and current waveforms and transmits them
-using the exact same packet protocol as the real STM32.
-
-ADC configuration (bits, VREF, sampling rate) is loaded from ADC_CONFIG.
-Waveform configuration is loaded from simulator.config.
-"""
-
 import struct
 import time
 

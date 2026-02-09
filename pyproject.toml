@@ -9,6 +9,7 @@ dependencies = [
     "plotly>=6.5.0",
     "pyserial>=3.5",
     "streamlit>=1.52.1",
+    "paho-mqtt>=2.1.0",
 ]
 
 [tool.uv]
