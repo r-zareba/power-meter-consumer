@@ -70,23 +70,25 @@ def generate_thyristor_current(
     num_samples = len(voltage_signal)
     t = np.arange(num_samples) / sampling_freq
     current = np.zeros(num_samples)
-    
+
     firing_angle_rad = np.radians(firing_angle_deg)
     period = 1.0 / frequency
     samples_per_period = int(sampling_freq * period)
-    
+
     # Find positive zero crossings of voltage
     for cycle in range(int(num_samples / samples_per_period) + 1):
         start_idx = cycle * samples_per_period
         if start_idx >= num_samples:
             break
-            
+
         # Calculate firing point in this cycle
-        firing_idx = start_idx + int(firing_angle_rad / (2 * np.pi) * samples_per_period)
-        
+        firing_idx = start_idx + int(
+            firing_angle_rad / (2 * np.pi) * samples_per_period
+        )
+
         # Find next zero crossing (end of positive half-cycle)
         end_idx = min(start_idx + samples_per_period // 2, num_samples)
-        
+
         # Generate current from firing angle to zero crossing
         if firing_idx < end_idx:
             phase_at_firing = firing_angle_rad
@@ -94,7 +96,7 @@ def generate_thyristor_current(
                 phase = 2 * np.pi * frequency * t[i] - phase_at_firing
                 if phase >= 0:
                     current[i] = amplitude * np.sin(phase + phase_at_firing)
-    
+
     return current
 
 
@@ -122,25 +124,25 @@ def generate_triac_current(
     num_samples = len(voltage_signal)
     t = np.arange(num_samples) / sampling_freq
     current = np.zeros(num_samples)
-    
+
     firing_angle_rad = np.radians(firing_angle_deg)
     period = 1.0 / frequency
     samples_per_period = int(sampling_freq * period)
     samples_per_half = samples_per_period // 2
-    
+
     # Process each half-cycle
     for cycle in range(int(num_samples / samples_per_half) + 1):
         start_idx = cycle * samples_per_half
         if start_idx >= num_samples:
             break
-            
+
         # Determine if positive or negative half-cycle
         is_positive = (cycle % 2) == 0
-        
+
         # Calculate firing point in this half-cycle
         firing_idx = start_idx + int(firing_angle_rad / np.pi * samples_per_half)
         end_idx = min(start_idx + samples_per_half, num_samples)
-        
+
         # Generate current from firing angle to end of half-cycle
         if firing_idx < end_idx:
             for i in range(firing_idx, end_idx):
@@ -149,5 +151,5 @@ def generate_triac_current(
                     current[i] = amplitude * np.sin(phase)
                 else:
                     current[i] = amplitude * np.sin(phase)
-    
+
     return current

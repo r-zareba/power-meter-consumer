@@ -27,8 +27,10 @@ def calculate_harmonics_with_phase(
     if use_window:
         window = np.hanning(len(signal))
         windowed_signal = signal * window
-        # Compensate for window power loss
-        window_correction = 2.0 / np.mean(window)
+        # Compensate for window amplitude reduction
+        # Hanning window reduces amplitude by factor of mean(window)
+        # For Hanning: mean = 0.5, so we need to multiply by 1/0.5 = 2.0
+        window_correction = 1.0 / np.mean(window)
     else:
         windowed_signal = signal
         window_correction = 1.0

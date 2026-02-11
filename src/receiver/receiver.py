@@ -10,7 +10,7 @@ from analytics.plots import plot_raw_adc_samples
 from analytics.power_analyzer import PowerAnalyzer
 from config import ADC_CONFIG
 from messaging.mqtt_publisher import MQTTPublisher
-from models.mqtt_message import AggregateMessage
+from models.aggregate_message import AggregateMessage
 from models.power_measurement import PowerMeasurement
 from storage.sqlite_manager import SQLiteManager
 from utils import PRINT_STATS, measure_time, print_performance_stats
@@ -53,9 +53,15 @@ class ADCReceiver:
         self.baudrate = baudrate
         self.serial = None
         self.packet_count = 0
-        self.error_count = 0
         self.last_sequence = None
         self.start_time = None
+
+        # Error counters (reset after initial sync)
+        self.crc_errors = 0
+        self.packets_dropped = 0
+        self.mqtt_failures = 0
+        self.db_failures = 0
+        self.read_errors = 0  # Incomplete packet reads
 
         self.voltage_buffer = []
         self.current_buffer = []
@@ -134,30 +140,30 @@ class ADCReceiver:
         # Read header (after start marker)
         header = self.serial.read(6)  # seq(2) + count(2) + vref_mv(2)
         if len(header) != 6:
-            self.error_count += 1
+            self.read_errors += 1
             return None
 
         # Quick parse of sample count to know how much data to read
         _, sample_count, _ = struct.unpack("<HHH", header)
         if sample_count != self.EXPECTED_SAMPLES:
-            self.error_count += 1
+            self.read_errors += 1
             return None
 
         # Read dual-channel ADC data: voltage_data[N] + current_data[N]
         voltage_bytes = self.serial.read(sample_count * 2)
         if len(voltage_bytes) != sample_count * 2:
-            self.error_count += 1
+            self.read_errors += 1
             return None
 
         current_bytes = self.serial.read(sample_count * 2)
         if len(current_bytes) != sample_count * 2:
-            self.error_count += 1
+            self.read_errors += 1
             return None
 
         # Read checksum and end marker
         trailer = self.serial.read(4)
         if len(trailer) != 4:
-            self.error_count += 1
+            self.read_errors += 1
             return None
 
         return {
@@ -183,14 +189,14 @@ class ADCReceiver:
 
         # Verify end marker
         if end_marker != self.END_MARKER:
-            self.error_count += 1
+            self.read_errors += 1
             return None
 
         # Verify checksum (header + data)
         data_bytes = voltage_bytes + current_bytes
         calculated_crc = self.calculate_crc16(header + data_bytes)
         if calculated_crc != checksum:
-            self.error_count += 1
+            self.crc_errors += 1
             return None
 
         # Track sequence for dropped packet detection
@@ -198,7 +204,7 @@ class ADCReceiver:
             expected_seq = (self.last_sequence + 1) & 0xFFFF
             if sequence != expected_seq:
                 dropped = (sequence - expected_seq) & 0xFFFF
-                self.error_count += dropped
+                self.packets_dropped += dropped
 
         self.last_sequence = sequence
         self.packet_count += 1
@@ -236,7 +242,11 @@ class ADCReceiver:
     def store_measurement(self, measurement: PowerMeasurement) -> None:
         """Helper method to track database insert timing."""
         if self.db_manager:
-            self.db_manager.insert(measurement)
+            try:
+                self.db_manager.insert(measurement)
+            except Exception as e:
+                self.db_failures += 1
+                print(f"⚠ Database insert failed: {e}")
 
     @measure_time
     def create_aggregate(
@@ -253,7 +263,11 @@ class ADCReceiver:
     def publish_aggregate(self, aggregate: AggregateMessage) -> None:
         """Helper method to track MQTT publish timing."""
         if self.mqtt_publisher:
-            self.mqtt_publisher.publish(aggregate)
+            try:
+                self.mqtt_publisher.publish(aggregate)
+            except Exception as e:
+                self.mqtt_failures += 1
+                print(f"⚠ MQTT publish failed: {e}")
 
     def handle_measurement(self, measurement: PowerMeasurement) -> None:
         """
@@ -273,7 +287,7 @@ class ADCReceiver:
             aggregate = self.create_aggregate(self.measurement_buffer)
 
             self.publish_aggregate(aggregate)
-            
+
             # Print aggregate data (every 1 second)
             if not self.print_measurements:
                 self._print_aggregate(aggregate)
@@ -308,6 +322,13 @@ class ADCReceiver:
             return
 
         print("Synced. Receiving packets...\n")
+
+        # Reset error counters - only track errors after successful sync
+        self.crc_errors = 0
+        self.packets_dropped = 0
+        self.mqtt_failures = 0
+        self.db_failures = 0
+        self.read_errors = 0
 
         # Process the first packet
         self.voltage_buffer.extend(first_packet["voltage"])
@@ -362,9 +383,11 @@ class ADCReceiver:
     def _print_measurement(self, measurement: PowerMeasurement) -> None:
         """Print all metrics from 200ms measurement."""
         elapsed = time.time() - self.start_time
-        print(f"\n{'='*80}")
-        print(f"[{elapsed:6.1f}s] PowerMeasurement #{self.analysis_count} @ {measurement.timestamp}")
-        print(f"{'='*80}")
+        print(f"\n{'=' * 80}")
+        print(
+            f"[{elapsed:6.1f}s] PowerMeasurement #{self.analysis_count} @ {measurement.timestamp}"
+        )
+        print(f"{'=' * 80}")
         print("RMS Values:")
         print(f"  V_rms = {measurement.v_rms:7.3f} V")
         print(f"  I_rms = {measurement.i_rms:7.4f} A")
@@ -374,8 +397,8 @@ class ADCReceiver:
         print(f"  S  = {measurement.S:7.2f} VA")
         print(f"  PF = {measurement.PF:6.4f}")
         print("Harmonics:")
-        print(f"  V_THD  = {measurement.v_thd*100:5.2f} %")
-        print(f"  I_THD  = {measurement.i_thd*100:5.2f} %")
+        print(f"  V_THD  = {measurement.v_thd * 100:5.2f} %")
+        print(f"  I_THD  = {measurement.i_thd * 100:5.2f} %")
         print(f"  V1_amp = {measurement.v1_amp:7.3f} V")
         print(f"  I1_amp = {measurement.i1_amp:7.4f} A")
         print("Phase:")
@@ -386,14 +409,21 @@ class ADCReceiver:
         print(f"  Crest_V       = {measurement.crest_factor_v:5.3f}")
         print(f"  Crest_I       = {measurement.crest_factor_i:5.3f}")
         print(f"  V_deviation   = {measurement.voltage_deviation_pct:+6.3f} %")
-        print(f"  K-factor      = {measurement.k_factor:6.3f}")
         print("CPC (Currents' Physical Components):")
         print(f"  DF = {measurement.cpc_distortion_factor:6.4f}")
-        print(f"  I_active    = {measurement.cpc_active_current:7.4f} A  (λ_a = {measurement.cpc_active_ratio:6.4f})")
-        print(f"  I_reactive  = {measurement.cpc_reactive_current:7.4f} A  (λ_r = {measurement.cpc_reactive_ratio:6.4f}, Q1 = {measurement.cpc_reactive_power:7.2f} VAR)")
-        print(f"  I_scattered = {measurement.cpc_scattered_current:7.4f} A  (λ_s = {measurement.cpc_scattered_ratio:6.4f}, D_s = {measurement.cpc_scattered_power:7.2f} VA)")
-        print(f"  I_generated = {measurement.cpc_generated_current:7.4f} A  (λ_g = {measurement.cpc_generated_ratio:6.4f}, D_g = {measurement.cpc_generated_power:7.2f} VA)")
-        
+        print(
+            f"  I_active    = {measurement.cpc_active_current:7.4f} A  (λ_a = {measurement.cpc_active_ratio:6.4f})"
+        )
+        print(
+            f"  I_reactive  = {measurement.cpc_reactive_current:7.4f} A  (λ_r = {measurement.cpc_reactive_ratio:6.4f}, Q1 = {measurement.cpc_reactive_power:7.2f} VAR)"
+        )
+        print(
+            f"  I_scattered = {measurement.cpc_scattered_current:7.4f} A  (λ_s = {measurement.cpc_scattered_ratio:6.4f}, D_s = {measurement.cpc_scattered_power:7.2f} VA)"
+        )
+        print(
+            f"  I_generated = {measurement.cpc_generated_current:7.4f} A  (λ_g = {measurement.cpc_generated_ratio:6.4f}, D_g = {measurement.cpc_generated_power:7.2f} VA)"
+        )
+
         # Harmonic responsibility analysis
         print("Harmonic Power Flow (IEEE 519 Responsibility):")
         grid_sourced = []
@@ -407,38 +437,38 @@ class ADCReceiver:
                     grid_sourced.append((h, p_h))
                 else:
                     load_sourced.append((h, p_h))
-        
+
         if grid_sourced:
             print("  Grid sourced (Grid→Load):")
             for h, p_h in grid_sourced[:10]:  # Top 10
                 print(f"    H{h:2d}: +{p_h:6.3f}W")
-        
+
         if load_sourced:
             print("  Load sourced (Load→Grid):")
             for h, p_h in load_sourced[:10]:  # Top 10
                 print(f"    H{h:2d}: {p_h:7.3f}W")
-        
+
         if not grid_sourced and not load_sourced:
             print("  No significant harmonic power flow detected")
-        
+
         print("Metadata:")
         print(f"  VREF={measurement.vref_mv}mV")
-        print(f"{'='*80}\n")
-    
+        print(f"{'=' * 80}\n")
+
     def _print_aggregate(self, aggregate: AggregateMessage) -> None:
         """Print 1-second aggregate data."""
         elapsed = time.time() - self.start_time
-        
+
         print(
             f"[{elapsed:6.1f}s] 1s AGG: "
-            f"P={aggregate.P.avg:6.2f}W({aggregate.P.min:.1f}-{aggregate.P.max:.1f}), "
-            f"V={aggregate.v_rms.avg:5.1f}V({aggregate.v_rms.min:.1f}-{aggregate.v_rms.max:.1f}), "
-            f"I={aggregate.i_rms.avg:5.2f}A({aggregate.i_rms.min:.2f}-{aggregate.i_rms.max:.2f}), "
-            f"PF={aggregate.PF.avg:.3f}, Freq={aggregate.frequency_avg:.2f}Hz, "
+            f"P={aggregate.P_avg:6.2f}W({aggregate.P_min:.1f}-{aggregate.P_max:.1f}), "
+            f"V={aggregate.v_rms_avg:5.1f}V({aggregate.v_rms_min:.1f}-{aggregate.v_rms_max:.1f}), "
+            f"I={aggregate.i_rms_avg:5.2f}A({aggregate.i_rms_min:.2f}-{aggregate.i_rms_max:.2f}), "
+            f"PF={aggregate.PF_avg:.3f}, Freq={aggregate.frequency_avg:.2f}Hz, "
             f"Energy: {aggregate.energy_wh:.4f}Wh, "
             f"Harmonics: Grid={aggregate.harmonics_grid_sourced_w:.2f}W, Load={aggregate.harmonics_load_sourced_w:.2f}W"
         )
-    
+
     def print_summary(self):
         """Print summary statistics"""
         if self.start_time is None:
@@ -446,16 +476,38 @@ class ADCReceiver:
 
         elapsed = time.time() - self.start_time
         if elapsed > 0:
-            print("\n" + "=" * 60)
+            print("\n" + "=" * 70)
             print("Summary:")
-            print(f"  Total packets received: {self.packet_count}")
-            print(f"  Analysis windows processed: {self.analysis_count}")
-            print(f"  Errors: {self.error_count}")
             print(f"  Duration: {elapsed:.1f}s")
-            print(f"  Packet rate: {self.packet_count / elapsed:.1f} packets/s")
-            print(f"  Analysis rate: {self.analysis_count / elapsed:.1f} windows/s")
-            print("  Expected analysis rate: 5.0 windows/s (200ms per window)")
-            print("=" * 60)
+            print()
+            print("  Packets:")
+            print(f"    Received: {self.packet_count}")
+            if self.packet_count > 0:
+                loss_rate = (
+                    self.packets_dropped / (self.packet_count + self.packets_dropped)
+                ) * 100
+                print(f"    Dropped: {self.packets_dropped} ({loss_rate:.2f}%)")
+            print()
+            print("  Analysis:")
+            print(f"    Windows: {self.analysis_count}")
+            print()
+            print("  Errors (after sync):")
+            print(f"    CRC failures: {self.crc_errors}")
+            print(f"    Read errors: {self.read_errors}")
+            print(f"    Packet drops: {self.packets_dropped}")
+            if self.db_manager:
+                print(f"    Database failures: {self.db_failures}")
+            if self.mqtt_publisher:
+                print(f"    MQTT failures: {self.mqtt_failures}")
+            total_errors = (
+                self.crc_errors
+                + self.read_errors
+                + self.packets_dropped
+                + self.db_failures
+                + self.mqtt_failures
+            )
+            print(f"    Total: {total_errors}")
+            print("=" * 70)
 
         # Print performance statistics if enabled
         if PRINT_STATS:

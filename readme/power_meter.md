@@ -39,7 +39,6 @@ This document outlines the measurements, metrics, and standards for building an 
 - Form Factor - RMS/Average ratio for waveform distortion assessment
 
 **Advanced Quality Metrics:**
-- K-Factor - Transformer derating factor for harmonic heating
 - Total Demand Distortion (TDD) - IEEE 519 compliance metric
 - Short-term flicker severity (Pst) - IEC 61000-4-15
 - Long-term flicker severity (Plt) - 2-hour sliding window
@@ -341,7 +340,6 @@ This document outlines the measurements, metrics, and standards for building an 
 - Harmonic phase angles
 - Czarnecki CPC decomposition (I_a, I_r, I_s, I_g)
 - Displacement and distortion power factors
-- K-factor calculation
 - TDD calculation
 - Per-harmonic power analysis
 

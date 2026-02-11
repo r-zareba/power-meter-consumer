@@ -10,7 +10,9 @@ import serial
 
 from analytics.power_analyzer import PowerAnalyzer
 from config import ADC_CONFIG
+from messaging.mqtt_publisher import MQTTPublisher
 from receiver.receiver import ADCReceiver
+from storage.sqlite_manager import SQLiteManager
 
 
 def parse_args():
@@ -30,8 +32,9 @@ def parse_args():
         "--plot", action="store_true", help="Plot first analysis window after sync"
     )
     parser.add_argument(
-        "--print-measurements", action="store_true",
-        help="Print full PowerMeasurement every 200ms (default: print 1-second aggregates only)"
+        "--print-measurements",
+        action="store_true",
+        help="Print full PowerMeasurement every 200ms (default: print 1-second aggregates only)",
     )
 
     return parser.parse_args()
@@ -65,18 +68,16 @@ def main():
             print(f"Error: {e}")
         return
     # Initialize database manager (if not disabled)
-    db_manager = None
-    # db_manager = SQLiteManager(db_path="data/power_measurements.db")
-    # db_manager.connect()
+    db_manager = SQLiteManager(db_path="data/power_measurements.db")
+    db_manager.connect()
 
-    mqtt_publisher = None
-    # mqtt_publisher = MQTTPublisher(
-    #     broker_host="localhost",
-    #     broker_port=1883,
-    #     device_id="power_meter_01",
-    #     topic_prefix="power_meter"
-    # )
-    # mqtt_publisher.connect()
+    mqtt_publisher = MQTTPublisher(
+        broker_host="localhost",
+        broker_port=1883,
+        device_id="power_meter_01",
+        topic_prefix="power_meter",
+    )
+    mqtt_publisher.connect()
 
     # Create power analyzer
     power_analyzer = PowerAnalyzer(
@@ -86,21 +87,12 @@ def main():
         nominal_voltage=230.0,  # EU 230V nominal (adjust for US: 120V)
     )
 
-    # Create receiver with injected dependencies
-    # receiver = ADCReceiver(
-    #     port=args.port,
-    #     baudrate=args.baud,
-    #     power_analyzer=power_analyzer,
-    #     db_manager=db_manager,
-    #     mqtt_publisher=mqtt_publisher
-    # )
-
     receiver = ADCReceiver(
         port=args.port,
         baudrate=args.baud,
         power_analyzer=power_analyzer,
-        db_manager=None,
-        mqtt_publisher=None,
+        db_manager=db_manager,
+        mqtt_publisher=mqtt_publisher,
         print_measurements=args.print_measurements,
     )
 

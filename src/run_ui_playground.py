@@ -46,15 +46,13 @@ def render_single_phase_tab():
 
     st.sidebar.subheader("Current")
     current_waveform_type = st.sidebar.selectbox(
-        "Waveform Type", 
-        ["Sine", "Thyristor (SCR)", "Triac"],
-        key="1ph_current_type"
+        "Waveform Type", ["Sine", "Thyristor (SCR)", "Triac"], key="1ph_current_type"
     )
-    
+
     i_amp = st.sidebar.slider(
         "Amplitude (A peak)", 0.1, 20.0, 14.14, 0.1, key="1ph_i_amp"
     )
-    
+
     if current_waveform_type == "Sine":
         i_phase_deg = st.sidebar.slider("Phase (°)", -180, 180, 0, 5, key="1ph_i_phase")
     else:
@@ -110,7 +108,7 @@ def render_single_phase_tab():
     t, v_t = generate_sine(
         v_amp, MAINS_FREQ, v_phase, SAMPLING_FREQ, NUM_SAMPLES, v_harmonics_dict
     )
-    
+
     # Generate current based on waveform type
     if current_waveform_type == "Sine":
         i_phase = np.radians(i_phase_deg)
@@ -138,7 +136,7 @@ def render_single_phase_tab():
     # Harmonics with phase
     v_harmonics_phase = calculate_harmonics_with_phase(v_t, SAMPLING_FREQ, MAINS_FREQ)
     i_harmonics_phase = calculate_harmonics_with_phase(i_t, SAMPLING_FREQ, MAINS_FREQ)
-    
+
     # Extract amplitudes for THD calculation
     v_harmonics = {h: amp for h, (amp, _) in v_harmonics_phase.items()}
     i_harmonics = {h: amp for h, (amp, _) in i_harmonics_phase.items()}
@@ -332,15 +330,15 @@ def render_three_phase_tab():
 
     st.sidebar.subheader("Phase 1 - Current")
     i1_waveform_type = st.sidebar.selectbox(
-        "Waveform Type", 
-        ["Sine", "Thyristor (SCR)", "Triac"],
-        key="3ph_i1_type"
+        "Waveform Type", ["Sine", "Thyristor (SCR)", "Triac"], key="3ph_i1_type"
     )
     i1_amp = st.sidebar.slider(
         "Amplitude (A peak)", 0.1, 20.0, 14.14, 0.1, key="3ph_i1_amp"
     )
     if i1_waveform_type == "Sine":
-        i1_phase_deg = st.sidebar.slider("Phase (°)", -180, 180, 0, 5, key="3ph_i1_phase")
+        i1_phase_deg = st.sidebar.slider(
+            "Phase (°)", -180, 180, 0, 5, key="3ph_i1_phase"
+        )
     else:
         i1_firing_angle_deg = st.sidebar.slider(
             "Firing Angle (°)", 0, 180, 60, 5, key="3ph_i1_firing"
@@ -355,9 +353,7 @@ def render_three_phase_tab():
 
     st.sidebar.subheader("Phase 2 - Current")
     i2_waveform_type = st.sidebar.selectbox(
-        "Waveform Type", 
-        ["Sine", "Thyristor (SCR)", "Triac"],
-        key="3ph_i2_type"
+        "Waveform Type", ["Sine", "Thyristor (SCR)", "Triac"], key="3ph_i2_type"
     )
     i2_amp = st.sidebar.slider(
         "Amplitude (A peak)", 0.1, 20.0, 14.14, 0.1, key="3ph_i2_amp"
@@ -378,15 +374,15 @@ def render_three_phase_tab():
 
     st.sidebar.subheader("Phase 3 - Current")
     i3_waveform_type = st.sidebar.selectbox(
-        "Waveform Type", 
-        ["Sine", "Thyristor (SCR)", "Triac"],
-        key="3ph_i3_type"
+        "Waveform Type", ["Sine", "Thyristor (SCR)", "Triac"], key="3ph_i3_type"
     )
     i3_amp = st.sidebar.slider(
         "Amplitude (A peak)", 0.1, 20.0, 14.14, 0.1, key="3ph_i3_amp"
     )
     if i3_waveform_type == "Sine":
-        i3_phase_deg = st.sidebar.slider("Phase (°)", -180, 180, 120, 5, key="3ph_i3_phase")
+        i3_phase_deg = st.sidebar.slider(
+            "Phase (°)", -180, 180, 120, 5, key="3ph_i3_phase"
+        )
     else:
         i3_firing_angle_deg = st.sidebar.slider(
             "Firing Angle (°)", 0, 180, 60, 5, key="3ph_i3_firing"
@@ -529,7 +525,7 @@ def render_three_phase_tab():
         i1_t = generate_triac_current(
             v1_t, i1_amp, i1_firing_angle_deg, SAMPLING_FREQ, MAINS_FREQ
         )
-    
+
     if i2_waveform_type == "Sine":
         _, i2_t = generate_sine(
             i2_amp,
@@ -547,7 +543,7 @@ def render_three_phase_tab():
         i2_t = generate_triac_current(
             v2_t, i2_amp, i2_firing_angle_deg, SAMPLING_FREQ, MAINS_FREQ
         )
-    
+
     if i3_waveform_type == "Sine":
         _, i3_t = generate_sine(
             i3_amp,

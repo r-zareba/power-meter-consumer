@@ -596,33 +596,84 @@ Safety margin: L476RG: 78.2 ms, H755ZI-Q: 56.5 ms ✓
 - Sequence number tracking for dropped packet detection
 - Dual-channel data reception (voltage and current)
 - IEC 61000-4-7 compliant 200ms analysis windows
-- Real-time statistics display (1-second averaging)
-- Raw byte mode for debugging
+- Real-time power quality analysis (31 metrics)
+- SQLite storage (200ms measurements)
+- MQTT publishing (1-second aggregates)
+- InfluxDB time-series storage (30-day retention)
 
+### Setup
 
+**1. Install dependencies:**
+```bash
+uv sync
+```
+
+**2. Install MQTT broker (Mosquitto):**
+```bash
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl start mosquitto
+sudo systemctl enable mosquitto
+
+# Test MQTT is running
+mosquitto_sub -t test &
+mosquitto_pub -t test -m "hello"
+# Should print "hello" - press Ctrl+C to stop
+```
+
+**3. Install InfluxDB 1.8:**
+```bash
+
+sudo apt-get update
+sudo apt-get install influxdb
+sudo apt install influxdb-client
+
+sudo systemctl start influxdb
+sudo systemctl enable influxdb
+
+```
+
+### Running the System
+
+**Terminal 1 - InfluxDB Consumer (start first):**
+```bash
+uv run src/run_influx_consumer.py
+```
+
+**Terminal 2 - Main Receiver:**
+```bash
+# With hardware
+python src/main.py /dev/ttyACM0
+
+# With simulator
+python src/run_stm32_simulator.py  # Terminal 2a
+python src/main.py /dev/pts/4      # Terminal 2b (use port from simulator)
+```
+
+**Optional flags:**
+```bash
+# Print detailed 200ms measurements (instead of 1s aggregates)
+python src/main.py /dev/ttyACM0 --print-measurements
+```
+
+### Data Flow
+
+```
+STM32 → Serial → ADCReceiver (200ms analysis)
+                      ↓
+                 SQLite (local)
+                      ↓
+                 MQTT (1s aggregates)
+                      ↓
+              InfluxDBConsumer
+                      ↓
+              InfluxDB (30 days)
+                      ↓
+                  Grafana
+```
 
 **To change sensor hardware:** Edit these values in `src/config.py` to match your actual sensors and calibration. These settings are shared across the simulator, receiver, and analytics modules.
 
 See [README_sensors.md](readme/README_sensors.md) for detailed sensor selection, configuration, and calibration.
-
----
-
-## Usage
-
-```bash
-python src/main.py --port /dev/ttyACM0 --baud 921600
-```
-
-**Raw byte mode (for debugging):**
-```bash
-python src/main.py --port /dev/ttyACM0 --baud 921600 --raw
-```
-
-
-**Command-line arguments:**
-- `--port` - Serial port device (default: /dev/ttyACM0)
-- `--baud` - Baud rate (default: 921600)
-- `--raw` - Display raw bytes instead of parsing packets (for debugging)
 
 
 ## System Architecture

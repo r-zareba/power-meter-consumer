@@ -1,13 +1,11 @@
 """SQLite database manager for local power measurement storage."""
 
-import sqlite3
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
 
 from models.power_measurement import PowerMeasurement
-
 
 logger = logging.getLogger(__name__)
 
@@ -15,51 +13,51 @@ logger = logging.getLogger(__name__)
 class SQLiteManager:
     """
     Manages SQLite database for storing 200ms power measurements.
-    
+
     Features:
     - WAL mode for concurrent reads/writes
     - Automatic schema creation
     - Index on timestamp for fast queries
     - Auto-vacuum for maintenance
     """
-    
+
     def __init__(self, db_path: str = "data/power_measurements.db"):
         """
         Initialize SQLite manager.
-        
+
         Args:
             db_path: Path to SQLite database file
         """
         self.db_path = db_path
         self.connection: Optional[sqlite3.Connection] = None
-        
+
         # Ensure data directory exists
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    
+
     def connect(self) -> None:
         """Open database connection and initialize schema."""
         try:
             self.connection = sqlite3.connect(
                 self.db_path,
                 check_same_thread=False,  # Allow use from multiple threads
-                timeout=10.0  # Wait up to 10 seconds if database is locked
+                timeout=10.0,  # Wait up to 10 seconds if database is locked
             )
-            
+
             # Enable WAL mode for better concurrent access
             self.connection.execute("PRAGMA journal_mode=WAL")
-            
+
             # Enable auto-vacuum to prevent database bloat
             self.connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
-            
+
             # Initialize schema
             self._create_tables()
-            
+
             logger.info(f"Connected to SQLite database: {self.db_path}")
-            
+
         except sqlite3.Error as e:
             logger.error(f"Failed to connect to database: {e}")
             raise
-    
+
     def _create_tables(self) -> None:
         """Create database schema if it doesn't exist."""
         schema = """
@@ -91,7 +89,6 @@ class SQLiteManager:
             crest_factor_v REAL NOT NULL,
             crest_factor_i REAL NOT NULL,
             voltage_deviation_pct REAL NOT NULL,
-            k_factor REAL NOT NULL,
             
             -- CPC components
             cpc_distortion_factor REAL NOT NULL,
@@ -115,7 +112,7 @@ class SQLiteManager:
         -- Index on timestamp for fast time-range queries
         CREATE INDEX IF NOT EXISTS idx_timestamp ON power_measurements(timestamp);
         """
-        
+
         try:
             self.connection.executescript(schema)
             self.connection.commit()
@@ -123,11 +120,11 @@ class SQLiteManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to create schema: {e}")
             raise
-    
+
     def insert(self, measurement: PowerMeasurement) -> None:
         """
         Insert a single 200ms measurement into the database.
-        
+
         Args:
             measurement: PowerMeasurement object to insert
         """
@@ -135,7 +132,7 @@ class SQLiteManager:
         INSERT INTO power_measurements (
             timestamp, v_rms, i_rms, P, Q, S, PF,
             v_thd, i_thd, v1_amp, i1_amp, phase_diff_deg, DPF,
-            crest_factor_v, crest_factor_i, voltage_deviation_pct, k_factor,
+            crest_factor_v, crest_factor_i, voltage_deviation_pct,
             cpc_distortion_factor, cpc_active_current, cpc_reactive_current, 
             cpc_scattered_current, cpc_generated_current,
             cpc_active_ratio, cpc_reactive_ratio, cpc_scattered_ratio, cpc_generated_ratio,
@@ -144,13 +141,13 @@ class SQLiteManager:
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?,
+            ?, ?, ?,
             ?, ?, ?, ?, ?,
             ?, ?, ?, ?,
             ?, ?, ?, ?, ?
         )
         """
-        
+
         values = (
             measurement.timestamp.isoformat(),
             measurement.v_rms,
@@ -168,7 +165,6 @@ class SQLiteManager:
             measurement.crest_factor_v,
             measurement.crest_factor_i,
             measurement.voltage_deviation_pct,
-            measurement.k_factor,
             measurement.cpc_distortion_factor,
             measurement.cpc_active_current,
             measurement.cpc_reactive_current,
@@ -184,7 +180,7 @@ class SQLiteManager:
             measurement.frequency,
             measurement.vref_mv,
         )
-        
+
         try:
             cursor = self.connection.cursor()
             cursor.execute(query, values)
@@ -193,7 +189,7 @@ class SQLiteManager:
         except sqlite3.Error as e:
             logger.error(f"Failed to insert measurement: {e}")
             # Don't raise - we don't want DB errors to crash the receiver
-    
+
     def close(self) -> None:
         """Close database connection."""
         if self.connection:

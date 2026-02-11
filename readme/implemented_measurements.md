@@ -35,7 +35,6 @@ Every 200ms window (2048 samples @ 10.24 kHz) contains:
 - **crest_factor_v** - Voltage crest factor (dimensionless). V_peak / V_rms, indicates waveform peakiness.
 - **crest_factor_i** - Current crest factor (dimensionless). I_peak / I_rms, high values indicate nonlinear loads.
 - **voltage_deviation_pct** - Voltage deviation from nominal (%). (V_rms - 230V) / 230V × 100.
-- **k_factor** - Transformer K-factor (dimensionless). Derating factor for transformers = Σ(h² × (I_h/I_rms)²).
 
 ### CPC (Currents' Physical Components) - Czarnecki Theory
 Advanced decomposition identifying power quality degradation causes:

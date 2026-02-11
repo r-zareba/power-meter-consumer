@@ -38,10 +38,7 @@ def main():
     args = parser.parse_args()
 
     # Create simulator
-    sim = STM32Simulator(
-        port=args.port, 
-        baudrate=args.baud
-    )
+    sim = STM32Simulator(port=args.port, baudrate=args.baud)
 
     if not sim.connect():
         return

@@ -35,7 +35,7 @@ class PowerAnalyzer:
     ):
         """
         Initialize power analyzer.
-        
+
         Args:
             sampling_freq: ADC sampling frequency (Hz)
             mains_freq: Mains frequency (50 or 60 Hz)
@@ -46,7 +46,7 @@ class PowerAnalyzer:
         self.mains_freq = mains_freq
         self.adc_to_mv_scale = adc_max_value * 1000.0
         self.nominal_voltage = nominal_voltage
-    
+
     def analyze_window(
         self,
         voltage_samples: List[int],
@@ -87,7 +87,6 @@ class PowerAnalyzer:
         p_t = v_t * i_t
         p = np.mean(p_t)  # Active power
         s = v_rms * i_rms  # Apparent power
-        q = np.sqrt(max(0, s**2 - p**2))  # Reactive power
         pf = p / s if s > 0 else 0.0  # Power factor
 
         # Harmonic analysis with phase
@@ -114,9 +113,16 @@ class PowerAnalyzer:
         phase_diff = np.angle(np.exp(1j * phase_diff))
         dpf = np.cos(phase_diff)  # Displacement power factor
 
+        # Reactive power calculation (fundamental component only)
+        # Q = sqrt(S^2 - P^2) is ONLY valid for sinusoidal conditions
+        # With harmonics: Q must be calculated from fundamental phase shift
+        v1_rms = v1_amp / np.sqrt(2)
+        i1_rms = i1_amp / np.sqrt(2)
+        q = v1_rms * i1_rms * np.sin(phase_diff)  # IEEE 1459 compliant
+
         # Czarnecki's CPC decomposition
         cpc = calculate_cpc_components(v_t, i_t, self.sampling_freq, self.mains_freq)
-        
+
         # Frequency measurement using zero-crossing detection (IEC 61000-4-30 method)
         # Count zero crossings in voltage signal
         zero_crossings = np.where(np.diff(np.sign(v_t)))[0]
@@ -131,27 +137,20 @@ class PowerAnalyzer:
         else:
             # Fallback to nominal if insufficient crossings (shouldn't happen in normal operation)
             measured_freq = self.mains_freq
-        
+
         # Power quality indicators
         v_peak = np.max(np.abs(v_t))
         i_peak = np.max(np.abs(i_t))
         crest_factor_v = v_peak / v_rms if v_rms > 0 else 0.0
         crest_factor_i = i_peak / i_rms if i_rms > 0 else 0.0
-        
+
         # Voltage deviation from nominal
         voltage_deviation_pct = (
             (v_rms - self.nominal_voltage) / self.nominal_voltage * 100.0
-            if self.nominal_voltage > 0 else 0.0
+            if self.nominal_voltage > 0
+            else 0.0
         )
-        
-        # K-factor (transformer derating factor)
-        # K = Σ(h² × (I_h/I_rms)²) for harmonics h > 1
-        k_factor = sum(
-            h**2 * (amp / i_rms)**2
-            for h, (amp, _) in i_harmonics.items()
-            if h > 1 and i_rms > 0
-        ) if i_rms > 0 else 1.0
-        
+
         # Harmonic power flow analysis (IEEE 519 responsibility determination)
         # P_h = V_h × I_h × cos(φ_v - φ_i)
         # Positive: Grid sources harmonic (Grid → Load power flow)
@@ -161,7 +160,9 @@ class PowerAnalyzer:
             if h in v_harmonics and h in i_harmonics:
                 v_amp, v_phase = v_harmonics[h]
                 i_amp, i_phase = i_harmonics[h]
-                h_phase_diff = v_phase - i_phase  # Use different variable name to avoid overwriting
+                h_phase_diff = (
+                    v_phase - i_phase
+                )  # Use different variable name to avoid overwriting
                 # Active power for this harmonic
                 p_h = v_amp * i_amp * np.cos(h_phase_diff)
                 harmonic_power_flow[h] = p_h
@@ -183,7 +184,6 @@ class PowerAnalyzer:
             crest_factor_v=crest_factor_v,
             crest_factor_i=crest_factor_i,
             voltage_deviation_pct=voltage_deviation_pct,
-            k_factor=k_factor,
             cpc_distortion_factor=cpc["DF"],
             cpc_active_current=cpc["I_a"],
             cpc_reactive_current=cpc["I_r"],
