@@ -1,0 +1,17 @@
+apiVersion: 1
+
+datasources:
+  - name: InfluxDB-PowerMeter
+    type: influxdb
+    access: proxy
+    url: http://host.docker.internal:8086
+    # For InfluxDB running in separate Docker container, use:
+    # url: http://influxdb:8086
+    database: power_meter
+    user: ''
+    password: ''
+    isDefault: true
+    jsonData:
+      timeInterval: '1s'
+      httpMode: GET
+    editable: true

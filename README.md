@@ -642,17 +642,24 @@ uv run src/run_influx_consumer.py
 **Terminal 2 - Main Receiver:**
 ```bash
 # With hardware
-python src/main.py /dev/ttyACM0
+uv run src/main.py /dev/ttyACM0
 
 # With simulator
-python src/run_stm32_simulator.py  # Terminal 2a
-python src/main.py /dev/pts/4      # Terminal 2b (use port from simulator)
+./setup_virtual_ports.sh # get 2 port ids from it and pass below     Terminal 2a
+uv run src/run_stm32_simulator.py --port=/dev/pts/id1              # Terminal 2b
+uv run src/main.py /dev/pts/id2                                    # Terminal 2c
 ```
 
 **Optional flags:**
 ```bash
 # Print detailed 200ms measurements (instead of 1s aggregates)
 python src/main.py /dev/ttyACM0 --print-measurements
+```
+
+**Terminal 3 - Grafana (visualization):**
+```bash
+sudo docker compose -f docker-compose.grafana.yml down && sudo docker compose -f docker-compose.grafana.yml up -d
+# Access at http://localhost:3000 (admin/admin)
 ```
 
 ### Data Flow
